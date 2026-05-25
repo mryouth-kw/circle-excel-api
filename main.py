@@ -1,16 +1,14 @@
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-import pandas as pd
 import openpyxl
 import zipfile
-import tempfile
-import os
+
+from io import BytesIO
 
 app = FastAPI()
 
-# Studioからアクセス可能にする
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,26 +23,41 @@ columns_to_remove = [
 ]
 
 
+@app.get("/")
+def root():
+    return {"message": "API OK"}
+
+
 @app.post("/process")
 async def process_excel(
     files: list[UploadFile] = File(...),
-    target_value: str = Form(...)
+    target_value: str = Form(...),
+    circle_id: str = Form(...),
+    visit: str = Form(...)
 ):
 
-    temp_dir = tempfile.mkdtemp()
 
-    zip_path = os.path.join(temp_dir, "result.zip")
+print("===== START PROCESS =====")
+    print("target_value:", target_value)
 
-    with zipfile.ZipFile(zip_path, "w") as zipf:
+    zip_buffer = BytesIO()
+
+    with zipfile.ZipFile(
+        zip_buffer,
+        "w",
+        zipfile.ZIP_DEFLATED
+    ) as zipf:
 
         for file in files:
 
-            input_path = os.path.join(temp_dir, file.filename)
+            print(f"Processing: {file.filename}")
 
-            with open(input_path, "wb") as f:
-                f.write(await file.read())
+            # UploadFile -> memory
+            file_bytes = await file.read()
 
-            wb = openpyxl.load_workbook(input_path)
+            excel_buffer = BytesIO(file_bytes)
+
+            wb = openpyxl.load_workbook(excel_buffer)
 
             for sheet_name in wb.sheetnames:
 
@@ -55,7 +68,10 @@ async def process_excel(
                 if not rows:
                     continue
 
-                headers = [str(h) if h else "" for h in rows[0]]
+                headers = [
+                    str(h).strip() if h else ""
+                    for h in rows[0]
+                ]
 
                 target_col_index = None
 
@@ -64,6 +80,7 @@ async def process_excel(
                         target_col_index = headers.index(col_name)
                         break
 
+                # ID列が無いシートはスキップ
                 if target_col_index is None:
                     continue
 
@@ -74,35 +91,51 @@ async def process_excel(
                     if len(row) <= target_col_index:
                         continue
 
-                    cell_value = str(row[target_col_index]).strip()
+                    cell_value = str(
+                        row[target_col_index]
+                    ).strip()
 
                     if cell_value == target_value:
                         filtered_rows.append(row)
 
-                new_wb = openpyxl.Workbook()
-                new_ws = new_wb.active
-                new_ws.title = sheet_name
+                # 元シート全削除
+                ws.delete_rows(1, ws.max_row)
 
+                # フィルタ後を書き戻し
                 for row in filtered_rows:
-                    new_ws.append(list(row))
+                    ws.append(list(row))
 
-                wb.remove(wb[sheet_name])
-                wb._add_sheet(new_ws)
+                print(
+                    f"{sheet_name}: {len(filtered_rows)-1} rows"
+                )
 
-            output_excel = os.path.join(
-                temp_dir,
-                file.filename
+            # 出力をメモリ化
+            output_buffer = BytesIO()
+
+            wb.save(output_buffer)
+
+            output_buffer.seek(0)
+
+            zipf.writestr(
+                file.filename,
+                output_buffer.read()
             )
 
-            wb.save(output_excel)
+            print(f"DONE: {file.filename}")
 
-            zipf.write(
-                output_excel,
-                arcname=file.filename
-            )
+    zip_buffer.seek(0)
 
-    return FileResponse(
-        zip_path,
+    zip_filename = (
+        f"調査票2_{circle_id}_Visit-{visit}.zip"
+    )
+
+    print("===== FINISH =====")
+
+    return StreamingResponse(
+        zip_buffer,
         media_type="application/zip",
-        filename="result.zip"
+        headers={
+            "Content-Disposition":
+            f'attachment; filename="{zip_filename}"'
+        }
     )
