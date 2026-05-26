@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -88,7 +88,6 @@ def safe_filename(text):
 
 # =========================
 # Google Sheets 読込
-# 初回のみアクセス
 # =========================
 def load_mapping():
 
@@ -100,10 +99,23 @@ def load_mapping():
 
     print("LOAD GOOGLE SHEET")
 
-    res = requests.get(
-        CSV_URL,
-        timeout=15
-    )
+    try:
+
+        res = requests.get(
+            CSV_URL,
+            timeout=15
+        )
+
+        res.raise_for_status()
+
+    except Exception as e:
+
+        print("GOOGLE SHEET ERROR:", str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Google Sheets load failed: {str(e)}"
+        )
 
     res.encoding = "utf-8"
 
@@ -232,19 +244,21 @@ async def process_excel(
     visit: str = Form(...)
 ):
 
+    print("=" * 80)
+    print("PROCESS START")
+    print("=" * 80)
+
     target_value = get_target_value(circle_id)
 
-    print("=" * 80)
     print("CIRCLE ID:", circle_id)
     print("TARGET VALUE:", target_value)
-    print("=" * 80)
 
     if not target_value:
-        return {
-            "error": (
-                f"{circle_id} に対応する値が見つかりません"
-            )
-        }
+
+        raise HTTPException(
+            status_code=404,
+            detail=f"{circle_id} に対応する値が見つかりません"
+        )
 
     temp_dir = tempfile.mkdtemp()
 
@@ -261,8 +275,6 @@ async def process_excel(
 
             try:
 
-                print("=" * 50)
-                print("\n")
                 print("=" * 80)
                 print("FILE:", file.filename)
                 print("=" * 80)
@@ -272,25 +284,6 @@ async def process_excel(
                     file.filename
                 )
 
-                safe_target_value = (
-                    str(target_value)
-                    .replace("/", "_")
-                    .replace("\\", "_")
-                    .replace(":", "_")
-                    .replace("*", "_")
-                    .replace("?", "_")
-                    .replace('"', "_")
-                    .replace("<", "_")
-                    .replace(">", "_")
-                    .replace("|", "_")
-                )
-
-                output_path = os.path.join(
-                    temp_dir,
-                    f"{safe_target_value}_{file.filename}"
-                )
-
-                # 保存
                 # upload保存
                 with open(input_path, "wb") as f:
                     f.write(await file.read())
@@ -327,7 +320,6 @@ async def process_excel(
                         data_only=False
                     )
 
-                    # xls出力はxlsxに変換
                     output_filename = (
                         f"{safe_target_value}_{base_name}.xlsx"
                     )
@@ -342,7 +334,6 @@ async def process_excel(
                 # =========================
                 else:
 
-                    print("XLSX MODE")
                     print("XLSX/XLSM MODE")
 
                     wb = openpyxl.load_workbook(
@@ -370,13 +361,9 @@ async def process_excel(
                 # =========================
                 ws = get_target_sheet(wb)
 
-                # 対象シートなし
                 if ws is None:
 
-                    print("TARGET SHEET NONE")
-                    print(
-                        "TARGET SHEET NOT FOUND"
-                    )
+                    print("TARGET SHEET NOT FOUND")
 
                     wb.save(output_path)
 
@@ -444,9 +431,7 @@ async def process_excel(
                 # =========================
                 if not target_col_index:
 
-                    print(
-                        "COLUMN NOT FOUND"
-                    )
+                    print("COLUMN NOT FOUND")
 
                     wb.save(output_path)
 
@@ -461,7 +446,6 @@ async def process_excel(
 
                 matched_count = 0
 
-                # 行判定
                 # =========================
                 # 行走査
                 # =========================
@@ -479,8 +463,6 @@ async def process_excel(
                         raw_value
                     )
 
-                    # 最初の10行だけログ
-                    # 最初の20行表示
                     if row_idx <= (
                         header_row_index + 20
                     ):
@@ -518,7 +500,11 @@ async def process_excel(
                 # 後ろから削除
                 # =========================
                 for row_idx in reversed(delete_rows):
-                    ws.delete_rows(row_idx, 1)
+
+                    ws.delete_rows(
+                        row_idx,
+                        1
+                    )
 
                 print(
                     "SAVE:",
@@ -533,8 +519,6 @@ async def process_excel(
                 )
 
                 print(
-                    "SAVE OK:",
-                    file.filename,
                     "ZIP ADD:",
                     output_filename
                 )
@@ -543,6 +527,11 @@ async def process_excel(
 
                 print(
                     f"ERROR: {file.filename}: {str(e)}"
+                )
+
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"{file.filename}: {str(e)}"
                 )
 
     zip_buffer.seek(0)
