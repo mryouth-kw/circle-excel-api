@@ -338,7 +338,7 @@ async def process_excel(
 
                     wb = openpyxl.load_workbook(
                         input_path,
-                        keep_vba=True,
+                        keep_vba=(ext == ".xlsm"),
                         data_only=False
                     )
 
@@ -525,9 +525,16 @@ async def process_excel(
 
             except Exception as e:
 
-                print(
-                    f"ERROR: {file.filename}: {str(e)}"
-                )
+                import traceback
+
+                print("=" * 80)
+                print("ERROR OCCURRED")
+                print(traceback.format_exc())
+                print("=" * 80)
+
+                return {
+                    "error": str(e)
+                }
 
                 raise HTTPException(
                     status_code=500,
