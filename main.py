@@ -68,6 +68,25 @@ def normalize(text):
 
 
 # =========================
+# ファイル名安全化
+# =========================
+def safe_filename(text):
+
+    return (
+        str(text)
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace(":", "_")
+        .replace("*", "_")
+        .replace("?", "_")
+        .replace('"', "_")
+        .replace("<", "_")
+        .replace(">", "_")
+        .replace("|", "_")
+    )
+
+
+# =========================
 # Google Sheets 読込
 # 初回のみアクセス
 # =========================
@@ -121,6 +140,9 @@ def get_target_value(circle_id):
     )
 
 
+# =========================
+# 対象シート取得
+# =========================
 def get_target_sheet(wb):
     """
     仕様:
@@ -135,12 +157,24 @@ def get_target_sheet(wb):
 
     first_sheet = sheetnames[0]
 
+    print("FIRST SHEET:", first_sheet)
+
     if normalize(first_sheet) == "検索情報":
 
+        print("検索情報 sheet detected")
+
         if len(sheetnames) >= 2:
+
+            print(
+                "USE SECOND SHEET:",
+                sheetnames[1]
+            )
+
             return wb[sheetnames[1]]
 
         return None
+
+    print("USE FIRST SHEET")
 
     return wb[first_sheet]
 
@@ -164,6 +198,11 @@ def convert_xls_to_xlsx(
     ) as writer:
 
         for sheet_name in excel_file.sheet_names:
+
+            print(
+                "CONVERT SHEET:",
+                sheet_name
+            )
 
             df = pd.read_excel(
                 xls_path,
@@ -194,7 +233,10 @@ async def process_excel(
 
     target_value = get_target_value(circle_id)
 
+    print("=" * 80)
+    print("CIRCLE ID:", circle_id)
     print("TARGET VALUE:", target_value)
+    print("=" * 80)
 
     if not target_value:
         return {
@@ -219,7 +261,10 @@ async def process_excel(
             try:
 
                 print("=" * 50)
+                print("\n")
+                print("=" * 80)
                 print("FILE:", file.filename)
+                print("=" * 80)
 
                 input_path = os.path.join(
                     temp_dir,
@@ -241,17 +286,25 @@ async def process_excel(
 
                 output_path = os.path.join(
                     temp_dir,
-                    f"processed_{file.filename}"
                     f"{safe_target_value}_{file.filename}"
                 )
 
                 # 保存
+                # upload保存
                 with open(input_path, "wb") as f:
                     f.write(await file.read())
 
                 ext = os.path.splitext(
+                base_name, ext = os.path.splitext(
                     file.filename
                 )[1].lower()
+                )
+
+                ext = ext.lower()
+
+                safe_target_value = safe_filename(
+                    target_value
+                )
 
                 # =========================
                 # xls
@@ -263,6 +316,7 @@ async def process_excel(
                     converted_path = os.path.join(
                         temp_dir,
                         f"converted_{os.path.basename(file.filename)}x"
+                        f"converted_{base_name}.xlsx"
                     )
 
                     convert_xls_to_xlsx(
@@ -275,12 +329,23 @@ async def process_excel(
                         data_only=False
                     )
 
+                    # xls出力はxlsxに変換
+                    output_filename = (
+                        f"{safe_target_value}_{base_name}.xlsx"
+                    )
+
+                    output_path = os.path.join(
+                        temp_dir,
+                        output_filename
+                    )
+
                 # =========================
                 # xlsx / xlsm
                 # =========================
                 else:
 
                     print("XLSX MODE")
+                    print("XLSX/XLSM MODE")
 
                     wb = openpyxl.load_workbook(
                         input_path,
@@ -288,25 +353,39 @@ async def process_excel(
                         data_only=False
                     )
 
+                    output_filename = (
+                        f"{safe_target_value}_{file.filename}"
+                    )
+
+                    output_path = os.path.join(
+                        temp_dir,
+                        output_filename
+                    )
+
                 print(
                     "SHEETS:",
                     wb.sheetnames
                 )
 
+                # =========================
                 # 対象シート取得
+                # =========================
                 ws = get_target_sheet(wb)
 
                 # 対象シートなし
                 if ws is None:
 
                     print("TARGET SHEET NONE")
+                    print(
+                        "TARGET SHEET NOT FOUND"
+                    )
 
                     wb.save(output_path)
 
                     zipf.write(
                         output_path,
-                        arcname=file.filename
                         arcname=os.path.basename(output_path)
+                        arcname=output_filename
                     )
 
                     continue
@@ -319,7 +398,9 @@ async def process_excel(
                 target_col_index = None
                 header_row_index = None
 
+                # =========================
                 # ヘッダー探索
+                # =========================
                 for row in ws.iter_rows(
                     min_row=1,
                     max_row=min(10, ws.max_row)
@@ -329,6 +410,12 @@ async def process_excel(
                         normalize(cell.value)
                         for cell in row
                     ]
+
+                    print(
+                        "HEADER ROW:",
+                        row[0].row,
+                        headers
+                    )
 
                     for col_name in columns_to_search:
 
@@ -340,6 +427,11 @@ async def process_excel(
 
                             header_row_index = row[0].row
 
+                            print(
+                                "FOUND COLUMN:",
+                                col_name
+                            )
+
                             break
 
                     if target_col_index:
@@ -347,10 +439,13 @@ async def process_excel(
 
                 print(
                     "TARGET COLUMN:",
+                    "TARGET COLUMN INDEX:",
                     target_col_index
                 )
 
+                # =========================
                 # ID列なし
+                # =========================
                 if not target_col_index:
 
                     print(
@@ -361,8 +456,8 @@ async def process_excel(
 
                     zipf.write(
                         output_path,
-                        arcname=file.filename
                         arcname=os.path.basename(output_path)
+                        arcname=output_filename
                     )
 
                     continue
@@ -372,6 +467,9 @@ async def process_excel(
                 matched_count = 0
 
                 # 行判定
+                # =========================
+                # 行走査
+                # =========================
                 for row_idx in range(
                     header_row_index + 1,
                     ws.max_row + 1
@@ -387,48 +485,73 @@ async def process_excel(
                     )
 
                     # 最初の10行だけログ
+                    # 最初の20行表示
                     if row_idx <= (
                         header_row_index + 10
+                        header_row_index + 20
                     ):
 
                         print(
+                            "ROW:",
                             row_idx,
                             "RAW:",
                             raw_value,
                             "NORMALIZED:",
                             cell_value
+                            cell_value,
+                            "TARGET:",
+                            target_value
                         )
 
                     if cell_value == target_value:
+
                         matched_count += 1
+
                     else:
+
                         delete_rows.append(row_idx)
 
                 print(
                     "MATCHED:",
+                    "MATCHED COUNT:",
                     matched_count
                 )
 
                 print(
                     "DELETE:",
+                    "DELETE COUNT:",
                     len(delete_rows)
                 )
 
+                # =========================
                 # 後ろから削除
+                # =========================
                 for row_idx in reversed(delete_rows):
                     ws.delete_rows(row_idx, 1)
+
+                    ws.delete_rows(
+                        row_idx,
+                        1
+                    )
+
+                print(
+                    "SAVE:",
+                    output_filename
+                )
 
                 wb.save(output_path)
 
                 zipf.write(
                     output_path,
-                    arcname=file.filename
                     arcname=os.path.basename(output_path)
+                    arcname=output_filename
                 )
 
                 print(
                     "SAVE OK:",
                     file.filename
+                    "ZIP ADD:",
+                    output_filename
                 )
 
             except Exception as e:
@@ -441,6 +564,11 @@ async def process_excel(
 
     zip_filename = (
         f"調査票2_{circle_id}_Visit-{visit}.zip"
+    )
+
+    print(
+        "RETURN ZIP:",
+        zip_filename
     )
 
     return StreamingResponse(
