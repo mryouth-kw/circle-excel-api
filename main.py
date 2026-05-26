@@ -24,7 +24,7 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -48,7 +48,7 @@ def log(*args):
 
 
 # =========================
-# Validation Error Handler
+# Validation Error
 # =========================
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(
@@ -82,6 +82,7 @@ def normalize(text):
         .strip()
     )
 
+    # 12345.0 → 12345
     try:
 
         num = float(text)
@@ -111,6 +112,9 @@ def safe_filename(text):
     )
 
 
+# =========================
+# Google Sheets 読込
+# =========================
 def load_mapping():
 
     global mapping_cache
@@ -145,7 +149,8 @@ def load_mapping():
             mapping_cache[key] = value
 
     log(
-        f"MAPPING COUNT: {len(mapping_cache)}"
+        "MAPPING COUNT:",
+        len(mapping_cache)
     )
 
     return mapping_cache
@@ -160,6 +165,9 @@ def get_target_value(circle_id):
     )
 
 
+# =========================
+# 対象シート取得
+# =========================
 def get_target_sheet(wb):
 
     sheetnames = wb.sheetnames
@@ -172,8 +180,6 @@ def get_target_sheet(wb):
     log("FIRST SHEET:", first_sheet)
 
     if normalize(first_sheet) == "検索情報":
-
-        log("検索情報 sheet detected")
 
         if len(sheetnames) >= 2:
 
@@ -223,8 +229,6 @@ async def process_excel(
 
         if not target_value:
 
-            log("TARGET VALUE NOT FOUND")
-
             return JSONResponse(
                 status_code=400,
                 content={
@@ -253,9 +257,9 @@ async def process_excel(
                 try:
 
                     log("")
-                    log("=" * 80)
+                    log("=" * 50)
                     log("FILE:", file.filename)
-                    log("=" * 80)
+                    log("=" * 50)
 
                     input_path = os.path.join(
                         temp_dir,
@@ -272,14 +276,13 @@ async def process_excel(
                     with open(input_path, "wb") as f:
                         f.write(content)
 
-                    base_name, ext = os.path.splitext(
+                    ext = os.path.splitext(
                         file.filename
-                    )
-
-                    ext = ext.lower()
+                    )[1].lower()
 
                     log("EXT:", ext)
 
+                    # xlsx / xlsm のみ
                     if ext not in [
                         ".xlsx",
                         ".xlsm"
@@ -318,13 +321,12 @@ async def process_excel(
                         wb.sheetnames
                     )
 
+                    # 対象シート
                     ws = get_target_sheet(wb)
 
                     if ws is None:
 
-                        log(
-                            "TARGET SHEET NOT FOUND"
-                        )
+                        log("TARGET SHEET NONE")
 
                         wb.save(output_path)
 
@@ -345,6 +347,9 @@ async def process_excel(
                     target_col_index = None
                     header_row_index = None
 
+                    # =========================
+                    # ヘッダー探索
+                    # =========================
                     for row in ws.iter_rows(
                         min_row=1,
                         max_row=min(10, ws.max_row)
@@ -382,10 +387,11 @@ async def process_excel(
                             break
 
                     log(
-                        "TARGET COLUMN INDEX:",
+                        "TARGET COLUMN:",
                         target_col_index
                     )
 
+                    # ID列なし
                     if not target_col_index:
 
                         log(
@@ -407,6 +413,9 @@ async def process_excel(
 
                     matched_count = 0
 
+                    # =========================
+                    # 行判定
+                    # =========================
                     for row_idx in range(
                         header_row_index + 1,
                         ws.max_row + 1
@@ -421,12 +430,12 @@ async def process_excel(
                             raw_value
                         )
 
+                        # 最初の10行だけログ
                         if row_idx <= (
-                            header_row_index + 20
+                            header_row_index + 10
                         ):
 
                             log(
-                                "ROW:",
                                 row_idx,
                                 "RAW:",
                                 raw_value,
@@ -445,15 +454,16 @@ async def process_excel(
                             delete_rows.append(row_idx)
 
                     log(
-                        "MATCHED COUNT:",
+                        "MATCHED:",
                         matched_count
                     )
 
                     log(
-                        "DELETE COUNT:",
+                        "DELETE:",
                         len(delete_rows)
                     )
 
+                    # 後ろから削除
                     for row_idx in reversed(delete_rows):
 
                         ws.delete_rows(
@@ -476,7 +486,7 @@ async def process_excel(
                     processed_file_count += 1
 
                     log(
-                        "ZIP ADD:",
+                        "SAVE OK:",
                         output_filename
                     )
 
@@ -491,7 +501,10 @@ async def process_excel(
 
         log("")
         log("=" * 80)
-        log("PROCESSED FILE COUNT:", processed_file_count)
+        log(
+            "PROCESSED FILE COUNT:",
+            processed_file_count
+        )
         log("=" * 80)
 
         if processed_file_count == 0:
