@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 import openpyxl
+import pandas as pd
 import zipfile
 import tempfile
 import os
@@ -32,37 +33,92 @@ CSV_URL = (
     "export?format=csv"
 )
 
+# =========================
+# キャッシュ
+# =========================
+mapping_cache = None
+
 
 def normalize(text):
+
     if text is None:
         return ""
 
-    return (
+    text = (
         str(text)
         .replace("\ufeff", "")
         .replace("\u3000", " ")
+        .replace("\r", "")
+        .replace("\n", "")
         .strip()
     )
 
+    # 12345.0 → 12345
+    try:
 
-def get_target_value(circle_id):
+        num = float(text)
 
-    res = requests.get(CSV_URL, timeout=15)
+        if num.is_integer():
+            return str(int(num))
+
+    except:
+        pass
+
+    return text
+
+
+# =========================
+# Google Sheets 読込
+# 初回のみアクセス
+# =========================
+def load_mapping():
+
+    global mapping_cache
+
+    # キャッシュ利用
+    if mapping_cache is not None:
+        return mapping_cache
+
+    print("LOAD GOOGLE SHEET")
+
+    res = requests.get(
+        CSV_URL,
+        timeout=15
+    )
+
     res.encoding = "utf-8"
 
-    reader = csv.reader(res.text.splitlines())
+    reader = csv.reader(
+        res.text.splitlines()
+    )
 
-    normalized_id = normalize(circle_id)
+    mapping_cache = {}
 
     for row in reader:
 
         if len(row) < 2:
             continue
 
-        if normalize(row[0]) == normalized_id:
-            return normalize(row[1])
+        key = normalize(row[0])
+        value = normalize(row[1])
 
-    return None
+        if key:
+            mapping_cache[key] = value
+
+    print(
+        f"MAPPING COUNT: {len(mapping_cache)}"
+    )
+
+    return mapping_cache
+
+
+def get_target_value(circle_id):
+
+    mapping = load_mapping()
+
+    return mapping.get(
+        normalize(circle_id)
+    )
 
 
 def get_target_sheet(wb):
@@ -89,6 +145,41 @@ def get_target_sheet(wb):
     return wb[first_sheet]
 
 
+# =========================
+# xls → xlsx変換
+# =========================
+def convert_xls_to_xlsx(
+    xls_path,
+    xlsx_path
+):
+
+    excel_file = pd.ExcelFile(
+        xls_path,
+        engine="xlrd"
+    )
+
+    with pd.ExcelWriter(
+        xlsx_path,
+        engine="openpyxl"
+    ) as writer:
+
+        for sheet_name in excel_file.sheet_names:
+
+            df = pd.read_excel(
+                xls_path,
+                sheet_name=sheet_name,
+                engine="xlrd",
+                header=None
+            )
+
+            df.to_excel(
+                writer,
+                sheet_name=sheet_name,
+                header=False,
+                index=False
+            )
+
+
 @app.get("/")
 def root():
     return {"message": "API OK"}
@@ -102,6 +193,8 @@ async def process_excel(
 ):
 
     target_value = get_target_value(circle_id)
+
+    print("TARGET VALUE:", target_value)
 
     if not target_value:
         return {
@@ -125,6 +218,9 @@ async def process_excel(
 
             try:
 
+                print("=" * 50)
+                print("FILE:", file.filename)
+
                 input_path = os.path.join(
                     temp_dir,
                     file.filename
@@ -139,11 +235,48 @@ async def process_excel(
                 with open(input_path, "wb") as f:
                     f.write(await file.read())
 
-                # フォーマット保持重視
-                wb = openpyxl.load_workbook(
-                    input_path,
-                    keep_vba=True,
-                    data_only=False
+                ext = os.path.splitext(
+                    file.filename
+                )[1].lower()
+
+                # =========================
+                # xls
+                # =========================
+                if ext == ".xls":
+
+                    print("XLS MODE")
+
+                    converted_path = os.path.join(
+                        temp_dir,
+                        f"converted_{os.path.basename(file.filename)}x"
+                    )
+
+                    convert_xls_to_xlsx(
+                        input_path,
+                        converted_path
+                    )
+
+                    wb = openpyxl.load_workbook(
+                        converted_path,
+                        data_only=False
+                    )
+
+                # =========================
+                # xlsx / xlsm
+                # =========================
+                else:
+
+                    print("XLSX MODE")
+
+                    wb = openpyxl.load_workbook(
+                        input_path,
+                        keep_vba=True,
+                        data_only=False
+                    )
+
+                print(
+                    "SHEETS:",
+                    wb.sheetnames
                 )
 
                 # 対象シート取得
@@ -151,6 +284,8 @@ async def process_excel(
 
                 # 対象シートなし
                 if ws is None:
+
+                    print("TARGET SHEET NONE")
 
                     wb.save(output_path)
 
@@ -161,11 +296,15 @@ async def process_excel(
 
                     continue
 
+                print(
+                    "TARGET SHEET:",
+                    ws.title
+                )
+
                 target_col_index = None
                 header_row_index = None
 
                 # ヘッダー探索
-                # 最大10行まで
                 for row in ws.iter_rows(
                     min_row=1,
                     max_row=min(10, ws.max_row)
@@ -191,8 +330,17 @@ async def process_excel(
                     if target_col_index:
                         break
 
-                # ID列が見つからない
+                print(
+                    "TARGET COLUMN:",
+                    target_col_index
+                )
+
+                # ID列なし
                 if not target_col_index:
+
+                    print(
+                        "COLUMN NOT FOUND"
+                    )
 
                     wb.save(output_path)
 
@@ -205,25 +353,52 @@ async def process_excel(
 
                 delete_rows = []
 
+                matched_count = 0
+
                 # 行判定
-                # openpyxl.cellアクセスを最小化
                 for row_idx in range(
                     header_row_index + 1,
                     ws.max_row + 1
                 ):
 
+                    raw_value = ws.cell(
+                        row=row_idx,
+                        column=target_col_index
+                    ).value
+
                     cell_value = normalize(
-                        ws.cell(
-                            row=row_idx,
-                            column=target_col_index
-                        ).value
+                        raw_value
                     )
 
-                    if cell_value != target_value:
+                    # 最初の10行だけログ
+                    if row_idx <= (
+                        header_row_index + 10
+                    ):
+
+                        print(
+                            row_idx,
+                            "RAW:",
+                            raw_value,
+                            "NORMALIZED:",
+                            cell_value
+                        )
+
+                    if cell_value == target_value:
+                        matched_count += 1
+                    else:
                         delete_rows.append(row_idx)
 
+                print(
+                    "MATCHED:",
+                    matched_count
+                )
+
+                print(
+                    "DELETE:",
+                    len(delete_rows)
+                )
+
                 # 後ろから削除
-                # フォーマット維持に最も安全
                 for row_idx in reversed(delete_rows):
                     ws.delete_rows(row_idx, 1)
 
@@ -232,6 +407,11 @@ async def process_excel(
                 zipf.write(
                     output_path,
                     arcname=file.filename
+                )
+
+                print(
+                    "SAVE OK:",
+                    file.filename
                 )
 
             except Exception as e:
