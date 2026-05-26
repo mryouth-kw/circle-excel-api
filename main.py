@@ -3,7 +3,6 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 import openpyxl
-import pandas as pd
 import zipfile
 import tempfile
 import os
@@ -33,9 +32,6 @@ CSV_URL = (
     "export?format=csv"
 )
 
-# =========================
-# キャッシュ
-# =========================
 mapping_cache = None
 
 
@@ -53,7 +49,6 @@ def normalize(text):
         .strip()
     )
 
-    # 12345.0 → 12345
     try:
 
         num = float(text)
@@ -67,9 +62,6 @@ def normalize(text):
     return text
 
 
-# =========================
-# ファイル名安全化
-# =========================
 def safe_filename(text):
 
     return (
@@ -86,10 +78,6 @@ def safe_filename(text):
     )
 
 
-# =========================
-# Google Sheets 読込
-# 初回のみアクセス
-# =========================
 def load_mapping():
 
     global mapping_cache
@@ -139,15 +127,7 @@ def get_target_value(circle_id):
     )
 
 
-# =========================
-# 対象シート取得
-# =========================
 def get_target_sheet(wb):
-    """
-    仕様:
-    ・1枚目が「検索情報」なら2枚目
-    ・それ以外なら1枚目
-    """
 
     sheetnames = wb.sheetnames
 
@@ -176,46 +156,6 @@ def get_target_sheet(wb):
     print("USE FIRST SHEET")
 
     return wb[first_sheet]
-
-
-# =========================
-# xls → xlsx変換
-# =========================
-def convert_xls_to_xlsx(
-    xls_path,
-    xlsx_path
-):
-
-    excel_file = pd.ExcelFile(
-        xls_path,
-        engine="xlrd"
-    )
-
-    with pd.ExcelWriter(
-        xlsx_path,
-        engine="openpyxl"
-    ) as writer:
-
-        for sheet_name in excel_file.sheet_names:
-
-            print(
-                "CONVERT SHEET:",
-                sheet_name
-            )
-
-            df = pd.read_excel(
-                xls_path,
-                sheet_name=sheet_name,
-                engine="xlrd",
-                header=None
-            )
-
-            df.to_excel(
-                writer,
-                sheet_name=sheet_name,
-                header=False,
-                index=False
-            )
 
 
 @app.get("/")
@@ -269,7 +209,6 @@ async def process_excel(
                     file.filename
                 )
 
-                # upload保存
                 with open(input_path, "wb") as f:
                     f.write(await file.read())
 
@@ -279,72 +218,42 @@ async def process_excel(
 
                 ext = ext.lower()
 
+                # xlsx / xlsm のみ許可
+                if ext not in [".xlsx", ".xlsm"]:
+
+                    print(
+                        "UNSUPPORTED FILE:",
+                        file.filename
+                    )
+
+                    continue
+
                 safe_target_value = safe_filename(
                     target_value
                 )
 
-                # =========================
-                # xls
-                # =========================
-                if ext == ".xls":
+                output_filename = (
+                    f"{safe_target_value}_{file.filename}"
+                )
 
-                    print("XLS MODE")
+                output_path = os.path.join(
+                    temp_dir,
+                    output_filename
+                )
 
-                    converted_path = os.path.join(
-                        temp_dir,
-                        f"converted_{base_name}.xlsx"
-                    )
+                print("OPEN WORKBOOK")
 
-                    convert_xls_to_xlsx(
-                        input_path,
-                        converted_path
-                    )
-
-                    wb = openpyxl.load_workbook(
-                        converted_path,
-                        data_only=False
-                    )
-
-                    # xls出力はxlsxに変換
-                    output_filename = (
-                        f"{safe_target_value}_{base_name}.xlsx"
-                    )
-
-                    output_path = os.path.join(
-                        temp_dir,
-                        output_filename
-                    )
-
-                # =========================
-                # xlsx / xlsm
-                # =========================
-                else:
-
-                    print("XLSX/XLSM MODE")
-
-                    wb = openpyxl.load_workbook(
-                        input_path,
-                        keep_vba=True,
-                        data_only=False
-                    )
-
-                    output_filename = (
-                        f"{safe_target_value}_{file.filename}"
-                    )
-
-                    output_path = os.path.join(
-                        temp_dir,
-                        output_filename
-                    )
+                wb = openpyxl.load_workbook(
+                    input_path,
+                    keep_vba=True,
+                    data_only=False
+                )
 
                 print(
                     "SHEETS:",
                     wb.sheetnames
                 )
 
-                # =========================
-                # 対象シート取得
-                # =========================
                 ws = get_target_sheet(wb)
 
                 if ws is None:
@@ -370,9 +279,6 @@ async def process_excel(
                 target_col_index = None
                 header_row_index = None
 
-                # =========================
-                # ヘッダー探索
-                # =========================
                 for row in ws.iter_rows(
                     min_row=1,
                     max_row=min(10, ws.max_row)
@@ -414,9 +320,6 @@ async def process_excel(
                     target_col_index
                 )
 
-                # =========================
-                # ID列なし
-                # =========================
                 if not target_col_index:
 
                     print(
@@ -436,9 +339,6 @@ async def process_excel(
 
                 matched_count = 0
 
-                # =========================
-                # 行走査
-                # =========================
                 for row_idx in range(
                     header_row_index + 1,
                     ws.max_row + 1
@@ -453,7 +353,6 @@ async def process_excel(
                         raw_value
                     )
 
-                    # 最初の20行表示
                     if row_idx <= (
                         header_row_index + 20
                     ):
@@ -487,9 +386,6 @@ async def process_excel(
                     len(delete_rows)
                 )
 
-                # =========================
-                # 後ろから削除
-                # =========================
                 for row_idx in reversed(delete_rows):
 
                     ws.delete_rows(
