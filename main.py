@@ -1,21 +1,14 @@
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import (
-    StreamingResponse,
-    JSONResponse,
-    PlainTextResponse
-)
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.exceptions import RequestValidationError
-
-from typing import List
 
 import openpyxl
+import pandas as pd
 import zipfile
 import tempfile
 import os
 import csv
 import requests
-import traceback
 
 from io import BytesIO
 
@@ -24,7 +17,7 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -40,32 +33,10 @@ CSV_URL = (
     "export?format=csv"
 )
 
+# =========================
+# キャッシュ
+# =========================
 mapping_cache = None
-
-
-def log(*args):
-    print(*args, flush=True)
-
-
-# =========================
-# Validation Error
-# =========================
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(
-    request,
-    exc
-):
-
-    log("")
-    log("=" * 80)
-    log("VALIDATION ERROR")
-    log(str(exc))
-    log("=" * 80)
-
-    return PlainTextResponse(
-        str(exc),
-        status_code=422
-    )
 
 
 def normalize(text):
@@ -73,6 +44,7 @@ def normalize(text):
     if text is None:
         return ""
 
+    return (
     text = (
         str(text)
         .replace("\ufeff", "")
@@ -85,6 +57,7 @@ def normalize(text):
     # 12345.0 → 12345
     try:
 
+def get_target_value(circle_id):
         num = float(text)
 
         if num.is_integer():
@@ -96,45 +69,34 @@ def normalize(text):
     return text
 
 
-def safe_filename(text):
-
-    return (
-        str(text)
-        .replace("/", "_")
-        .replace("\\", "_")
-        .replace(":", "_")
-        .replace("*", "_")
-        .replace("?", "_")
-        .replace('"', "_")
-        .replace("<", "_")
-        .replace(">", "_")
-        .replace("|", "_")
-    )
-
-
 # =========================
 # Google Sheets 読込
+# 初回のみアクセス
 # =========================
 def load_mapping():
 
     global mapping_cache
 
+    # キャッシュ利用
     if mapping_cache is not None:
         return mapping_cache
 
-    log("LOAD GOOGLE SHEET")
+    print("LOAD GOOGLE SHEET")
 
     res = requests.get(
         CSV_URL,
         timeout=15
     )
 
+    res = requests.get(CSV_URL, timeout=15)
     res.encoding = "utf-8"
 
+    reader = csv.reader(res.text.splitlines())
     reader = csv.reader(
         res.text.splitlines()
     )
 
+    normalized_id = normalize(circle_id)
     mapping_cache = {}
 
     for row in reader:
@@ -142,19 +104,21 @@ def load_mapping():
         if len(row) < 2:
             continue
 
+        if normalize(row[0]) == normalized_id:
+            return normalize(row[1])
         key = normalize(row[0])
         value = normalize(row[1])
 
         if key:
             mapping_cache[key] = value
 
-    log(
-        "MAPPING COUNT:",
-        len(mapping_cache)
+    print(
+        f"MAPPING COUNT: {len(mapping_cache)}"
     )
 
     return mapping_cache
 
+    return None
 
 def get_target_value(circle_id):
 
@@ -165,10 +129,12 @@ def get_target_value(circle_id):
     )
 
 
-# =========================
-# 対象シート取得
-# =========================
 def get_target_sheet(wb):
+    """
+    仕様:
+    ・1枚目が「検索情報」なら2枚目
+    ・それ以外なら1枚目
+    """
 
     sheetnames = wb.sheetnames
 
@@ -177,138 +143,143 @@ def get_target_sheet(wb):
 
     first_sheet = sheetnames[0]
 
-    log("FIRST SHEET:", first_sheet)
-
     if normalize(first_sheet) == "検索情報":
 
         if len(sheetnames) >= 2:
-
-            log(
-                "USE SECOND SHEET:",
-                sheetnames[1]
-            )
-
             return wb[sheetnames[1]]
 
         return None
 
-    log("USE FIRST SHEET")
-
     return wb[first_sheet]
+
+
+# =========================
+# xls → xlsx変換
+# =========================
+def convert_xls_to_xlsx(
+    xls_path,
+    xlsx_path
+):
+
+    excel_file = pd.ExcelFile(
+        xls_path,
+        engine="xlrd"
+    )
+
+    with pd.ExcelWriter(
+        xlsx_path,
+        engine="openpyxl"
+    ) as writer:
+
+        for sheet_name in excel_file.sheet_names:
+
+            df = pd.read_excel(
+                xls_path,
+                sheet_name=sheet_name,
+                engine="xlrd",
+                header=None
+            )
+
+            df.to_excel(
+                writer,
+                sheet_name=sheet_name,
+                header=False,
+                index=False
+            )
 
 
 @app.get("/")
 def root():
-
-    log("ROOT ACCESS")
-
     return {"message": "API OK"}
 
 
 @app.post("/process")
 async def process_excel(
-    files: List[UploadFile] = File(...),
+    files: list[UploadFile] = File(...),
     circle_id: str = Form(...),
     visit: str = Form(...)
 ):
 
-    log("")
-    log("=" * 80)
-    log("PROCESS START")
-    log("=" * 80)
+    target_value = get_target_value(circle_id)
 
-    try:
+    print("TARGET VALUE:", target_value)
 
-        log("FILES COUNT:", len(files))
-        log("CIRCLE ID:", circle_id)
-        log("VISIT:", visit)
-
-        target_value = get_target_value(circle_id)
-
-        log("TARGET VALUE:", target_value)
-
-        if not target_value:
-
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error":
-                    f"{circle_id} に対応する値が見つかりません"
-                }
+    if not target_value:
+        return {
+            "error": (
+                f"{circle_id} に対応する値が見つかりません"
             )
+        }
 
-        temp_dir = tempfile.mkdtemp()
+    temp_dir = tempfile.mkdtemp()
 
-        log("TEMP DIR:", temp_dir)
+    zip_buffer = BytesIO()
 
-        zip_buffer = BytesIO()
+    with zipfile.ZipFile(
+        zip_buffer,
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=1
+    ) as zipf:
 
-        processed_file_count = 0
+        for file in files:
 
-        with zipfile.ZipFile(
-            zip_buffer,
-            mode="w",
-            compression=zipfile.ZIP_DEFLATED,
-            compresslevel=1
-        ) as zipf:
+            try:
 
-            for file in files:
+                print("=" * 50)
+                print("FILE:", file.filename)
 
-                try:
+                input_path = os.path.join(
+                    temp_dir,
+                    file.filename
+                )
 
-                    log("")
-                    log("=" * 50)
-                    log("FILE:", file.filename)
-                    log("=" * 50)
+                output_path = os.path.join(
+                    temp_dir,
+                    f"processed_{file.filename}"
+                )
 
-                    input_path = os.path.join(
+                # 保存
+                with open(input_path, "wb") as f:
+                    f.write(await file.read())
+
+                # フォーマット保持重視
+                wb = openpyxl.load_workbook(
+                    input_path,
+                    keep_vba=True,
+                    data_only=False
+                ext = os.path.splitext(
+                    file.filename
+                )[1].lower()
+
+                # =========================
+                # xls
+                # =========================
+                if ext == ".xls":
+
+                    print("XLS MODE")
+
+                    converted_path = os.path.join(
                         temp_dir,
-                        file.filename
+                        f"converted_{os.path.basename(file.filename)}x"
                     )
 
-                    content = await file.read()
-
-                    log(
-                        "FILE SIZE:",
-                        len(content)
+                    convert_xls_to_xlsx(
+                        input_path,
+                        converted_path
                     )
 
-                    with open(input_path, "wb") as f:
-                        f.write(content)
-
-                    ext = os.path.splitext(
-                        file.filename
-                    )[1].lower()
-
-                    log("EXT:", ext)
-
-                    # xlsx / xlsm のみ
-                    if ext not in [
-                        ".xlsx",
-                        ".xlsm"
-                    ]:
-
-                        log(
-                            "UNSUPPORTED FILE:",
-                            file.filename
-                        )
-
-                        continue
-
-                    safe_target_value = safe_filename(
-                        target_value
+                    wb = openpyxl.load_workbook(
+                        converted_path,
+                        data_only=False
                     )
 
-                    output_filename = (
-                        f"{safe_target_value}_{file.filename}"
-                    )
+                # =========================
+                # xlsx / xlsm
+                # =========================
+                else:
 
-                    output_path = os.path.join(
-                        temp_dir,
-                        output_filename
-                    )
-
-                    log("OPEN WORKBOOK")
+                    print("XLSX MODE")
 
                     wb = openpyxl.load_workbook(
                         input_path,
@@ -316,239 +287,171 @@ async def process_excel(
                         data_only=False
                     )
 
-                    log(
-                        "SHEETS:",
-                        wb.sheetnames
+                print(
+                    "SHEETS:",
+                    wb.sheetnames
+                )
+
+                # 対象シート取得
+                ws = get_target_sheet(wb)
+
+                # 対象シートなし
+                if ws is None:
+
+                    print("TARGET SHEET NONE")
+
+                    wb.save(output_path)
+
+                    zipf.write(
+                        output_path,
+                        arcname=file.filename
                     )
 
-                    # 対象シート
-                    ws = get_target_sheet(wb)
+                    continue
 
-                    if ws is None:
+                print(
+                    "TARGET SHEET:",
+                    ws.title
+                )
 
-                        log("TARGET SHEET NONE")
+                target_col_index = None
+                header_row_index = None
 
-                        wb.save(output_path)
+                # ヘッダー探索
+                # 最大10行まで
+                for row in ws.iter_rows(
+                    min_row=1,
+                    max_row=min(10, ws.max_row)
+                ):
 
-                        zipf.write(
-                            output_path,
-                            arcname=output_filename
-                        )
+                    headers = [
+                        normalize(cell.value)
+                        for cell in row
+                    ]
 
-                        processed_file_count += 1
+                    for col_name in columns_to_search:
 
-                        continue
+                        if col_name in headers:
 
-                    log(
-                        "TARGET SHEET:",
-                        ws.title
-                    )
-
-                    target_col_index = None
-                    header_row_index = None
-
-                    # =========================
-                    # ヘッダー探索
-                    # =========================
-                    for row in ws.iter_rows(
-                        min_row=1,
-                        max_row=min(10, ws.max_row)
-                    ):
-
-                        headers = [
-                            normalize(cell.value)
-                            for cell in row
-                        ]
-
-                        log(
-                            "HEADER ROW:",
-                            row[0].row,
-                            headers
-                        )
-
-                        for col_name in columns_to_search:
-
-                            if col_name in headers:
-
-                                target_col_index = (
-                                    headers.index(col_name) + 1
-                                )
-
-                                header_row_index = row[0].row
-
-                                log(
-                                    "FOUND COLUMN:",
-                                    col_name
-                                )
-
-                                break
-
-                        if target_col_index:
-                            break
-
-                    log(
-                        "TARGET COLUMN:",
-                        target_col_index
-                    )
-
-                    # ID列なし
-                    if not target_col_index:
-
-                        log(
-                            "COLUMN NOT FOUND"
-                        )
-
-                        wb.save(output_path)
-
-                        zipf.write(
-                            output_path,
-                            arcname=output_filename
-                        )
-
-                        processed_file_count += 1
-
-                        continue
-
-                    delete_rows = []
-
-                    matched_count = 0
-
-                    # =========================
-                    # 行判定
-                    # =========================
-                    for row_idx in range(
-                        header_row_index + 1,
-                        ws.max_row + 1
-                    ):
-
-                        raw_value = ws.cell(
-                            row=row_idx,
-                            column=target_col_index
-                        ).value
-
-                        cell_value = normalize(
-                            raw_value
-                        )
-
-                        # 最初の10行だけログ
-                        if row_idx <= (
-                            header_row_index + 10
-                        ):
-
-                            log(
-                                row_idx,
-                                "RAW:",
-                                raw_value,
-                                "NORMALIZED:",
-                                cell_value,
-                                "TARGET:",
-                                target_value
+                            target_col_index = (
+                                headers.index(col_name) + 1
                             )
 
-                        if cell_value == target_value:
+                            header_row_index = row[0].row
 
-                            matched_count += 1
+                            break
 
-                        else:
+                    if target_col_index:
+                        break
 
-                            delete_rows.append(row_idx)
+                # ID列が見つからない
+                print(
+                    "TARGET COLUMN:",
+                    target_col_index
+                )
 
-                    log(
-                        "MATCHED:",
-                        matched_count
-                    )
+                # ID列なし
+                if not target_col_index:
 
-                    log(
-                        "DELETE:",
-                        len(delete_rows)
-                    )
-
-                    # 後ろから削除
-                    for row_idx in reversed(delete_rows):
-
-                        ws.delete_rows(
-                            row_idx,
-                            1
-                        )
-
-                    log(
-                        "SAVE:",
-                        output_filename
+                    print(
+                        "COLUMN NOT FOUND"
                     )
 
                     wb.save(output_path)
 
                     zipf.write(
                         output_path,
-                        arcname=output_filename
+                        arcname=file.filename
                     )
 
-                    processed_file_count += 1
+                    continue
 
-                    log(
-                        "SAVE OK:",
-                        output_filename
+                delete_rows = []
+
+                matched_count = 0
+
+                # 行判定
+                # openpyxl.cellアクセスを最小化
+                for row_idx in range(
+                    header_row_index + 1,
+                    ws.max_row + 1
+                ):
+
+                    raw_value = ws.cell(
+                        row=row_idx,
+                        column=target_col_index
+                    ).value
+
+                    cell_value = normalize(
+                        ws.cell(
+                            row=row_idx,
+                            column=target_col_index
+                        ).value
+                        raw_value
                     )
 
-                except Exception as e:
+                    if cell_value != target_value:
+                    # 最初の10行だけログ
+                    if row_idx <= (
+                        header_row_index + 10
+                    ):
 
-                    log("")
-                    log("=" * 80)
-                    log("FILE ERROR")
-                    log(str(e))
-                    traceback.print_exc()
-                    log("=" * 80)
+                        print(
+                            row_idx,
+                            "RAW:",
+                            raw_value,
+                            "NORMALIZED:",
+                            cell_value
+                        )
 
-        log("")
-        log("=" * 80)
-        log(
-            "PROCESSED FILE COUNT:",
-            processed_file_count
-        )
-        log("=" * 80)
+                    if cell_value == target_value:
+                        matched_count += 1
+                    else:
+                        delete_rows.append(row_idx)
 
-        if processed_file_count == 0:
+                print(
+                    "MATCHED:",
+                    matched_count
+                )
 
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error":
-                    "処理可能なxlsx/xlsmファイルがありませんでした"
-                }
-            )
+                print(
+                    "DELETE:",
+                    len(delete_rows)
+                )
 
-        zip_buffer.seek(0)
+                # 後ろから削除
+                # フォーマット維持に最も安全
+                for row_idx in reversed(delete_rows):
+                    ws.delete_rows(row_idx, 1)
 
-        zip_filename = (
-            f"調査票2_{circle_id}_Visit-{visit}.zip"
-        )
+                wb.save(output_path)
 
-        log(
-            "RETURN ZIP:",
-            zip_filename
-        )
+                zipf.write(
+                    output_path,
+                    arcname=file.filename
+                )
 
-        return StreamingResponse(
-            zip_buffer,
-            media_type="application/zip",
-            headers={
-                "Content-Disposition":
-                f'attachment; filename="{zip_filename}"'
-            }
-        )
+                print(
+                    "SAVE OK:",
+                    file.filename
+                )
 
-    except Exception as e:
+            except Exception as e:
 
-        log("")
-        log("=" * 80)
-        log("PROCESS ERROR")
-        log(str(e))
-        traceback.print_exc()
-        log("=" * 80)
+                print(
+                    f"ERROR: {file.filename}: {str(e)}"
+                )
 
-        return JSONResponse(
-            status_code=500,
-            content={
-                "error": str(e)
-            }
-        )
+    zip_buffer.seek(0)
+
+    zip_filename = (
+        f"調査票2_{circle_id}_Visit-{visit}.zip"
+    )
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition":
+            f'attachment; filename="{zip_filename}"'
+        }
