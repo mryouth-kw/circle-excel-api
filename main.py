@@ -26,7 +26,11 @@ columns_to_remove = [
     "患者ID"
 ]
 
-CSV_URL = "https://docs.google.com/spreadsheets/d/1Ys9iA8aIqyAgnOoUrnu1CZT6adT2E12hSuDmaH4blXQ/export?format=csv"
+CSV_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1Ys9iA8aIqyAgnOoUrnu1CZT6adT2E12hSuDmaH4blXQ/"
+    "export?format=csv"
+)
 
 
 def normalize(text):
@@ -35,20 +39,27 @@ def normalize(text):
 
 def get_target_value(circle_id):
 
-    res = requests.get(CSV_URL)
+    res = requests.get(CSV_URL, timeout=15)
     res.encoding = "utf-8"
 
     reader = csv.reader(res.text.splitlines())
+
+    normalized_id = normalize(circle_id)
 
     for row in reader:
 
         if len(row) < 2:
             continue
 
-        if normalize(row[0]) == normalize(circle_id):
+        if normalize(row[0]) == normalized_id:
             return normalize(row[1])
 
     return None
+
+
+@app.get("/")
+def root():
+    return {"message": "API OK"}
 
 
 @app.post("/process")
@@ -62,7 +73,10 @@ async def process_excel(
 
     if not target_value:
         return {
-            "error": f"{circle_id} に対応する値が見つかりません"
+            "error": (
+                f"{circle_id} に対応する"
+                "値が見つかりません"
+            )
         }
 
     temp_dir = tempfile.mkdtemp()
@@ -71,8 +85,9 @@ async def process_excel(
 
     with zipfile.ZipFile(
         zip_buffer,
-        "w",
-        zipfile.ZIP_DEFLATED
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=1
     ) as zipf:
 
         for file in files:
@@ -82,85 +97,84 @@ async def process_excel(
                 file.filename
             )
 
+            output_path = os.path.join(
+                temp_dir,
+                f"processed_{file.filename}"
+            )
+
+            # upload保存
             with open(input_path, "wb") as f:
                 f.write(await file.read())
 
+            # keep_vba=True が重要
             wb = openpyxl.load_workbook(
-                input_path
+                input_path,
+                keep_vba=True,
+                data_only=False
             )
 
-            for sheet_name in wb.sheetnames:
+            for ws in wb.worksheets:
 
-                ws = wb[sheet_name]
-
-                header_row = None
                 target_col_index = None
+                header_row_index = None
 
                 # header探索
                 for row in ws.iter_rows(
                     min_row=1,
-                    max_row=5,
-                    values_only=True
+                    max_row=10
                 ):
 
                     headers = [
-                        str(v).strip() if v else ""
-                        for v in row
+                        normalize(cell.value)
+                        for cell in row
                     ]
 
                     for col_name in columns_to_remove:
 
                         if col_name in headers:
 
-                            header_row = headers
-                            target_col_index = headers.index(col_name)
+                            target_col_index = (
+                                headers.index(col_name) + 1
+                            )
+
+                            header_row_index = row[0].row
+
                             break
 
-                    if target_col_index is not None:
+                    if target_col_index:
                         break
 
-                if target_col_index is None:
+                # ID列なし
+                if not target_col_index:
                     continue
 
-                rows_to_keep = []
+                delete_rows = []
 
-                # header
-                rows_to_keep.append(header_row)
-
-                for row in ws.iter_rows(
-                    min_row=2,
-                    values_only=True
+                # データ走査
+                for row_idx in range(
+                    header_row_index + 1,
+                    ws.max_row + 1
                 ):
 
-                    if len(row) <= target_col_index:
-                        continue
+                    cell_value = normalize(
+                        ws.cell(
+                            row=row_idx,
+                            column=target_col_index
+                        ).value
+                    )
 
-                    val = str(
-                        row[target_col_index]
-                    ).strip()
+                    if cell_value != target_value:
+                        delete_rows.append(row_idx)
 
-                    if val == target_value:
-                        rows_to_keep.append(row)
+                # 後ろから削除
+                # これが超重要
+                for row_idx in reversed(delete_rows):
+                    ws.delete_rows(row_idx, 1)
 
-                # 全削除
-                ws.delete_rows(
-                    1,
-                    ws.max_row
-                )
-
-                # 再書込
-                for row in rows_to_keep:
-                    ws.append(list(row))
-
-            output_excel = os.path.join(
-                temp_dir,
-                file.filename
-            )
-
-            wb.save(output_excel)
+            wb.save(output_path)
 
             zipf.write(
-                output_excel,
+                output_path,
                 arcname=file.filename
             )
 
