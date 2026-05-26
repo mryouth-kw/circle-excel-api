@@ -1,6 +1,13 @@
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import (
+    StreamingResponse,
+    JSONResponse,
+    PlainTextResponse
+)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+
+from typing import List
 
 import openpyxl
 import zipfile
@@ -14,11 +21,10 @@ from io import BytesIO
 
 app = FastAPI()
 
-# CORS修正
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -39,6 +45,27 @@ mapping_cache = None
 
 def log(*args):
     print(*args, flush=True)
+
+
+# =========================
+# Validation Error Handler
+# =========================
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request,
+    exc
+):
+
+    log("")
+    log("=" * 80)
+    log("VALIDATION ERROR")
+    log(str(exc))
+    log("=" * 80)
+
+    return PlainTextResponse(
+        str(exc),
+        status_code=422
+    )
 
 
 def normalize(text):
@@ -91,50 +118,37 @@ def load_mapping():
     if mapping_cache is not None:
         return mapping_cache
 
-    try:
+    log("LOAD GOOGLE SHEET")
 
-        log("LOAD GOOGLE SHEET")
+    res = requests.get(
+        CSV_URL,
+        timeout=15
+    )
 
-        res = requests.get(
-            CSV_URL,
-            timeout=15
-        )
+    res.encoding = "utf-8"
 
-        res.raise_for_status()
+    reader = csv.reader(
+        res.text.splitlines()
+    )
 
-        res.encoding = "utf-8"
+    mapping_cache = {}
 
-        reader = csv.reader(
-            res.text.splitlines()
-        )
+    for row in reader:
 
-        mapping_cache = {}
+        if len(row) < 2:
+            continue
 
-        for row in reader:
+        key = normalize(row[0])
+        value = normalize(row[1])
 
-            if len(row) < 2:
-                continue
+        if key:
+            mapping_cache[key] = value
 
-            key = normalize(row[0])
-            value = normalize(row[1])
+    log(
+        f"MAPPING COUNT: {len(mapping_cache)}"
+    )
 
-            if key:
-                mapping_cache[key] = value
-
-        log(
-            f"MAPPING COUNT: {len(mapping_cache)}"
-        )
-
-        return mapping_cache
-
-    except Exception as e:
-
-        log("LOAD MAPPING ERROR")
-        log(str(e))
-
-        traceback.print_exc()
-
-        return {}
+    return mapping_cache
 
 
 def get_target_value(circle_id):
@@ -179,12 +193,15 @@ def get_target_sheet(wb):
 
 @app.get("/")
 def root():
+
+    log("ROOT ACCESS")
+
     return {"message": "API OK"}
 
 
 @app.post("/process")
 async def process_excel(
-    files: list[UploadFile] = File(...),
+    files: List[UploadFile] = File(...),
     circle_id: str = Form(...),
     visit: str = Form(...)
 ):
@@ -194,327 +211,331 @@ async def process_excel(
     log("PROCESS START")
     log("=" * 80)
 
-    log("FILES COUNT:", len(files))
-    log("CIRCLE ID:", circle_id)
-    log("VISIT:", visit)
+    try:
 
-    target_value = get_target_value(circle_id)
+        log("FILES COUNT:", len(files))
+        log("CIRCLE ID:", circle_id)
+        log("VISIT:", visit)
 
-    log("TARGET VALUE:", target_value)
+        target_value = get_target_value(circle_id)
 
-    if not target_value:
+        log("TARGET VALUE:", target_value)
 
-        log("TARGET VALUE NOT FOUND")
+        if not target_value:
 
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error":
-                f"{circle_id} に対応する値が見つかりません"
-            }
-        )
+            log("TARGET VALUE NOT FOUND")
 
-    temp_dir = tempfile.mkdtemp()
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error":
+                    f"{circle_id} に対応する値が見つかりません"
+                }
+            )
 
-    log("TEMP DIR:", temp_dir)
+        temp_dir = tempfile.mkdtemp()
 
-    zip_buffer = BytesIO()
+        log("TEMP DIR:", temp_dir)
 
-    processed_file_count = 0
+        zip_buffer = BytesIO()
 
-    with zipfile.ZipFile(
-        zip_buffer,
-        mode="w",
-        compression=zipfile.ZIP_DEFLATED,
-        compresslevel=1
-    ) as zipf:
+        processed_file_count = 0
 
-        for file in files:
+        with zipfile.ZipFile(
+            zip_buffer,
+            mode="w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=1
+        ) as zipf:
 
-            try:
+            for file in files:
 
-                log("")
-                log("=" * 80)
-                log("FILE:", file.filename)
-                log("=" * 80)
+                try:
 
-                if not file.filename:
+                    log("")
+                    log("=" * 80)
+                    log("FILE:", file.filename)
+                    log("=" * 80)
 
-                    log("EMPTY FILENAME")
-                    continue
+                    input_path = os.path.join(
+                        temp_dir,
+                        file.filename
+                    )
 
-                # ファイル名安全化
-                original_filename = os.path.basename(
-                    file.filename
-                )
-
-                input_path = os.path.join(
-                    temp_dir,
-                    original_filename
-                )
-
-                content = await file.read()
-
-                if len(content) == 0:
-
-                    log("EMPTY FILE")
-                    continue
-
-                with open(input_path, "wb") as f:
-                    f.write(content)
-
-                log(
-                    "FILE SIZE:",
-                    len(content)
-                )
-
-                base_name, ext = os.path.splitext(
-                    original_filename
-                )
-
-                ext = ext.lower()
-
-                log("EXT:", ext)
-
-                # xlsx / xlsm のみ許可
-                if ext not in [".xlsx", ".xlsm"]:
+                    content = await file.read()
 
                     log(
-                        "UNSUPPORTED FILE:",
-                        original_filename
+                        "FILE SIZE:",
+                        len(content)
                     )
 
-                    continue
+                    with open(input_path, "wb") as f:
+                        f.write(content)
 
-                safe_target_value = safe_filename(
-                    target_value
-                )
-
-                output_filename = (
-                    f"{safe_target_value}_{original_filename}"
-                )
-
-                output_path = os.path.join(
-                    temp_dir,
-                    output_filename
-                )
-
-                log("OPEN WORKBOOK")
-
-                wb = openpyxl.load_workbook(
-                    input_path,
-                    keep_vba=True,
-                    data_only=False
-                )
-
-                log(
-                    "SHEETS:",
-                    wb.sheetnames
-                )
-
-                ws = get_target_sheet(wb)
-
-                if ws is None:
-
-                    log(
-                        "TARGET SHEET NOT FOUND"
+                    base_name, ext = os.path.splitext(
+                        file.filename
                     )
 
-                    wb.save(output_path)
+                    ext = ext.lower()
 
-                    zipf.write(
-                        output_path,
-                        arcname=output_filename
-                    )
+                    log("EXT:", ext)
 
-                    processed_file_count += 1
-
-                    continue
-
-                log(
-                    "TARGET SHEET:",
-                    ws.title
-                )
-
-                target_col_index = None
-                header_row_index = None
-
-                for row in ws.iter_rows(
-                    min_row=1,
-                    max_row=min(10, ws.max_row)
-                ):
-
-                    headers = [
-                        normalize(cell.value)
-                        for cell in row
-                    ]
-
-                    log(
-                        "HEADER ROW:",
-                        row[0].row,
-                        headers
-                    )
-
-                    for col_name in columns_to_search:
-
-                        if col_name in headers:
-
-                            target_col_index = (
-                                headers.index(col_name) + 1
-                            )
-
-                            header_row_index = row[0].row
-
-                            log(
-                                "FOUND COLUMN:",
-                                col_name
-                            )
-
-                            break
-
-                    if target_col_index:
-                        break
-
-                log(
-                    "TARGET COLUMN INDEX:",
-                    target_col_index
-                )
-
-                if not target_col_index:
-
-                    log(
-                        "COLUMN NOT FOUND"
-                    )
-
-                    wb.save(output_path)
-
-                    zipf.write(
-                        output_path,
-                        arcname=output_filename
-                    )
-
-                    processed_file_count += 1
-
-                    continue
-
-                delete_rows = []
-
-                matched_count = 0
-
-                for row_idx in range(
-                    header_row_index + 1,
-                    ws.max_row + 1
-                ):
-
-                    raw_value = ws.cell(
-                        row=row_idx,
-                        column=target_col_index
-                    ).value
-
-                    cell_value = normalize(
-                        raw_value
-                    )
-
-                    if row_idx <= (
-                        header_row_index + 20
-                    ):
+                    if ext not in [
+                        ".xlsx",
+                        ".xlsm"
+                    ]:
 
                         log(
-                            "ROW:",
-                            row_idx,
-                            "RAW:",
-                            raw_value,
-                            "NORMALIZED:",
-                            cell_value,
-                            "TARGET:",
-                            target_value
+                            "UNSUPPORTED FILE:",
+                            file.filename
                         )
 
-                    if cell_value == target_value:
+                        continue
 
-                        matched_count += 1
-
-                    else:
-
-                        delete_rows.append(row_idx)
-
-                log(
-                    "MATCHED COUNT:",
-                    matched_count
-                )
-
-                log(
-                    "DELETE COUNT:",
-                    len(delete_rows)
-                )
-
-                for row_idx in reversed(delete_rows):
-
-                    ws.delete_rows(
-                        row_idx,
-                        1
+                    safe_target_value = safe_filename(
+                        target_value
                     )
 
-                log(
-                    "SAVE:",
-                    output_filename
-                )
+                    output_filename = (
+                        f"{safe_target_value}_{file.filename}"
+                    )
 
-                wb.save(output_path)
+                    output_path = os.path.join(
+                        temp_dir,
+                        output_filename
+                    )
 
-                zipf.write(
-                    output_path,
-                    arcname=output_filename
-                )
+                    log("OPEN WORKBOOK")
 
-                processed_file_count += 1
+                    wb = openpyxl.load_workbook(
+                        input_path,
+                        keep_vba=True,
+                        data_only=False
+                    )
 
-                log(
-                    "ZIP ADD:",
-                    output_filename
-                )
+                    log(
+                        "SHEETS:",
+                        wb.sheetnames
+                    )
 
-            except Exception as e:
+                    ws = get_target_sheet(wb)
 
-                log("")
-                log("ERROR OCCURRED")
-                log(str(e))
+                    if ws is None:
 
-                traceback.print_exc()
+                        log(
+                            "TARGET SHEET NOT FOUND"
+                        )
 
-    log("")
-    log("=" * 80)
-    log("PROCESSED FILE COUNT:", processed_file_count)
-    log("=" * 80)
+                        wb.save(output_path)
 
-    if processed_file_count == 0:
+                        zipf.write(
+                            output_path,
+                            arcname=output_filename
+                        )
 
-        log("NO FILE PROCESSED")
+                        processed_file_count += 1
 
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error":
-                "処理可能なxlsx/xlsmファイルがありませんでした"
+                        continue
+
+                    log(
+                        "TARGET SHEET:",
+                        ws.title
+                    )
+
+                    target_col_index = None
+                    header_row_index = None
+
+                    for row in ws.iter_rows(
+                        min_row=1,
+                        max_row=min(10, ws.max_row)
+                    ):
+
+                        headers = [
+                            normalize(cell.value)
+                            for cell in row
+                        ]
+
+                        log(
+                            "HEADER ROW:",
+                            row[0].row,
+                            headers
+                        )
+
+                        for col_name in columns_to_search:
+
+                            if col_name in headers:
+
+                                target_col_index = (
+                                    headers.index(col_name) + 1
+                                )
+
+                                header_row_index = row[0].row
+
+                                log(
+                                    "FOUND COLUMN:",
+                                    col_name
+                                )
+
+                                break
+
+                        if target_col_index:
+                            break
+
+                    log(
+                        "TARGET COLUMN INDEX:",
+                        target_col_index
+                    )
+
+                    if not target_col_index:
+
+                        log(
+                            "COLUMN NOT FOUND"
+                        )
+
+                        wb.save(output_path)
+
+                        zipf.write(
+                            output_path,
+                            arcname=output_filename
+                        )
+
+                        processed_file_count += 1
+
+                        continue
+
+                    delete_rows = []
+
+                    matched_count = 0
+
+                    for row_idx in range(
+                        header_row_index + 1,
+                        ws.max_row + 1
+                    ):
+
+                        raw_value = ws.cell(
+                            row=row_idx,
+                            column=target_col_index
+                        ).value
+
+                        cell_value = normalize(
+                            raw_value
+                        )
+
+                        if row_idx <= (
+                            header_row_index + 20
+                        ):
+
+                            log(
+                                "ROW:",
+                                row_idx,
+                                "RAW:",
+                                raw_value,
+                                "NORMALIZED:",
+                                cell_value,
+                                "TARGET:",
+                                target_value
+                            )
+
+                        if cell_value == target_value:
+
+                            matched_count += 1
+
+                        else:
+
+                            delete_rows.append(row_idx)
+
+                    log(
+                        "MATCHED COUNT:",
+                        matched_count
+                    )
+
+                    log(
+                        "DELETE COUNT:",
+                        len(delete_rows)
+                    )
+
+                    for row_idx in reversed(delete_rows):
+
+                        ws.delete_rows(
+                            row_idx,
+                            1
+                        )
+
+                    log(
+                        "SAVE:",
+                        output_filename
+                    )
+
+                    wb.save(output_path)
+
+                    zipf.write(
+                        output_path,
+                        arcname=output_filename
+                    )
+
+                    processed_file_count += 1
+
+                    log(
+                        "ZIP ADD:",
+                        output_filename
+                    )
+
+                except Exception as e:
+
+                    log("")
+                    log("=" * 80)
+                    log("FILE ERROR")
+                    log(str(e))
+                    traceback.print_exc()
+                    log("=" * 80)
+
+        log("")
+        log("=" * 80)
+        log("PROCESSED FILE COUNT:", processed_file_count)
+        log("=" * 80)
+
+        if processed_file_count == 0:
+
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error":
+                    "処理可能なxlsx/xlsmファイルがありませんでした"
+                }
+            )
+
+        zip_buffer.seek(0)
+
+        zip_filename = (
+            f"調査票2_{circle_id}_Visit-{visit}.zip"
+        )
+
+        log(
+            "RETURN ZIP:",
+            zip_filename
+        )
+
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition":
+                f'attachment; filename="{zip_filename}"'
             }
         )
 
-    zip_buffer.seek(0)
+    except Exception as e:
 
-    zip_filename = (
-        f"調査票2_{circle_id}_Visit-{visit}.zip"
-    )
+        log("")
+        log("=" * 80)
+        log("PROCESS ERROR")
+        log(str(e))
+        traceback.print_exc()
+        log("=" * 80)
 
-    log(
-        "RETURN ZIP:",
-        zip_filename
-    )
-
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={
-            "Content-Disposition":
-            f'attachment; filename="{zip_filename}"'
-        }
-    )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": str(e)
+            }
+        )
