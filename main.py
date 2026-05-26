@@ -220,6 +220,7 @@ def convert_xls_to_xlsx(
 
 
 @app.get("/")
+@app.head("/")
 def root():
     return {"message": "API OK"}
 
@@ -294,10 +295,8 @@ async def process_excel(
                 with open(input_path, "wb") as f:
                     f.write(await file.read())
 
-                ext = os.path.splitext(
                 base_name, ext = os.path.splitext(
                     file.filename
-                )[1].lower()
                 )
 
                 ext = ext.lower()
@@ -315,7 +314,6 @@ async def process_excel(
 
                     converted_path = os.path.join(
                         temp_dir,
-                        f"converted_{os.path.basename(file.filename)}x"
                         f"converted_{base_name}.xlsx"
                     )
 
@@ -384,7 +382,6 @@ async def process_excel(
 
                     zipf.write(
                         output_path,
-                        arcname=os.path.basename(output_path),
                         arcname=output_filename
                     )
 
@@ -438,7 +435,6 @@ async def process_excel(
                         break
 
                 print(
-                    "TARGET COLUMN:",
                     "TARGET COLUMN INDEX:",
                     target_col_index
                 )
@@ -456,7 +452,6 @@ async def process_excel(
 
                     zipf.write(
                         output_path,
-                        arcname=os.path.basename(output_path),
                         arcname=output_filename
                     )
 
@@ -487,7 +482,6 @@ async def process_excel(
                     # 最初の10行だけログ
                     # 最初の20行表示
                     if row_idx <= (
-                        header_row_index + 10
                         header_row_index + 20
                     ):
 
@@ -497,7 +491,6 @@ async def process_excel(
                             "RAW:",
                             raw_value,
                             "NORMALIZED:",
-                            cell_value
                             cell_value,
                             "TARGET:",
                             target_value
@@ -512,13 +505,11 @@ async def process_excel(
                         delete_rows.append(row_idx)
 
                 print(
-                    "MATCHED:",
                     "MATCHED COUNT:",
                     matched_count
                 )
 
                 print(
-                    "DELETE:",
                     "DELETE COUNT:",
                     len(delete_rows)
                 )
@@ -529,11 +520,6 @@ async def process_excel(
                 for row_idx in reversed(delete_rows):
                     ws.delete_rows(row_idx, 1)
 
-                    ws.delete_rows(
-                        row_idx,
-                        1
-                    )
-
                 print(
                     "SAVE:",
                     output_filename
@@ -543,13 +529,12 @@ async def process_excel(
 
                 zipf.write(
                     output_path,
-                    arcname=os.path.basename(output_path),
                     arcname=output_filename
                 )
 
                 print(
                     "SAVE OK:",
-                    file.filename
+                    file.filename,
                     "ZIP ADD:",
                     output_filename
                 )
