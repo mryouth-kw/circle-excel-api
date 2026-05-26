@@ -384,7 +384,7 @@ async def process_excel(
 
                     zipf.write(
                         output_path,
-                        arcname=os.path.basename(output_path)
+                        arcname=os.path.basename(output_path),
                         arcname=output_filename
                     )
 
