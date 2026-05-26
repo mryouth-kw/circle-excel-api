@@ -14,10 +14,11 @@ from io import BytesIO
 
 app = FastAPI()
 
+# CORS修正
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -90,37 +91,50 @@ def load_mapping():
     if mapping_cache is not None:
         return mapping_cache
 
-    log("LOAD GOOGLE SHEET")
+    try:
 
-    res = requests.get(
-        CSV_URL,
-        timeout=15
-    )
+        log("LOAD GOOGLE SHEET")
 
-    res.encoding = "utf-8"
+        res = requests.get(
+            CSV_URL,
+            timeout=15
+        )
 
-    reader = csv.reader(
-        res.text.splitlines()
-    )
+        res.raise_for_status()
 
-    mapping_cache = {}
+        res.encoding = "utf-8"
 
-    for row in reader:
+        reader = csv.reader(
+            res.text.splitlines()
+        )
 
-        if len(row) < 2:
-            continue
+        mapping_cache = {}
 
-        key = normalize(row[0])
-        value = normalize(row[1])
+        for row in reader:
 
-        if key:
-            mapping_cache[key] = value
+            if len(row) < 2:
+                continue
 
-    log(
-        f"MAPPING COUNT: {len(mapping_cache)}"
-    )
+            key = normalize(row[0])
+            value = normalize(row[1])
 
-    return mapping_cache
+            if key:
+                mapping_cache[key] = value
+
+        log(
+            f"MAPPING COUNT: {len(mapping_cache)}"
+        )
+
+        return mapping_cache
+
+    except Exception as e:
+
+        log("LOAD MAPPING ERROR")
+        log(str(e))
+
+        traceback.print_exc()
+
+        return {}
 
 
 def get_target_value(circle_id):
@@ -224,24 +238,38 @@ async def process_excel(
                 log("FILE:", file.filename)
                 log("=" * 80)
 
-                input_path = os.path.join(
-                    temp_dir,
+                if not file.filename:
+
+                    log("EMPTY FILENAME")
+                    continue
+
+                # ファイル名安全化
+                original_filename = os.path.basename(
                     file.filename
                 )
 
+                input_path = os.path.join(
+                    temp_dir,
+                    original_filename
+                )
+
+                content = await file.read()
+
+                if len(content) == 0:
+
+                    log("EMPTY FILE")
+                    continue
+
                 with open(input_path, "wb") as f:
-
-                    content = await file.read()
-
-                    log(
-                        "FILE SIZE:",
-                        len(content)
-                    )
-
                     f.write(content)
 
+                log(
+                    "FILE SIZE:",
+                    len(content)
+                )
+
                 base_name, ext = os.path.splitext(
-                    file.filename
+                    original_filename
                 )
 
                 ext = ext.lower()
@@ -253,7 +281,7 @@ async def process_excel(
 
                     log(
                         "UNSUPPORTED FILE:",
-                        file.filename
+                        original_filename
                     )
 
                     continue
@@ -263,7 +291,7 @@ async def process_excel(
                 )
 
                 output_filename = (
-                    f"{safe_target_value}_{file.filename}"
+                    f"{safe_target_value}_{original_filename}"
                 )
 
                 output_path = os.path.join(
@@ -460,6 +488,8 @@ async def process_excel(
     log("=" * 80)
 
     if processed_file_count == 0:
+
+        log("NO FILE PROCESSED")
 
         return JSONResponse(
             status_code=400,
