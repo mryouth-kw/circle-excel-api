@@ -226,9 +226,22 @@ async def process_excel(
                     file.filename
                 )
 
+                safe_target_value = (
+                    str(target_value)
+                    .replace("/", "_")
+                    .replace("\\", "_")
+                    .replace(":", "_")
+                    .replace("*", "_")
+                    .replace("?", "_")
+                    .replace('"', "_")
+                    .replace("<", "_")
+                    .replace(">", "_")
+                    .replace("|", "_")
+                )
+
                 output_path = os.path.join(
                     temp_dir,
-                    f"processed_{file.filename}"
+                    f"{safe_target_value}_{file.filename}"
                 )
 
                 # 保存
@@ -291,7 +304,7 @@ async def process_excel(
 
                     zipf.write(
                         output_path,
-                        arcname=file.filename
+                        arcname=os.path.basename(output_path)
                     )
 
                     continue
@@ -346,7 +359,7 @@ async def process_excel(
 
                     zipf.write(
                         output_path,
-                        arcname=file.filename
+                        arcname=os.path.basename(output_path)
                     )
 
                     continue
@@ -406,7 +419,7 @@ async def process_excel(
 
                 zipf.write(
                     output_path,
-                    arcname=file.filename
+                    arcname=os.path.basename(output_path)
                 )
 
                 print(
