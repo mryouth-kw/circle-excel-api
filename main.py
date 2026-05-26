@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 import openpyxl
@@ -8,6 +8,7 @@ import tempfile
 import os
 import csv
 import requests
+import traceback
 
 from io import BytesIO
 
@@ -33,6 +34,10 @@ CSV_URL = (
 )
 
 mapping_cache = None
+
+
+def log(*args):
+    print(*args, flush=True)
 
 
 def normalize(text):
@@ -85,7 +90,7 @@ def load_mapping():
     if mapping_cache is not None:
         return mapping_cache
 
-    print("LOAD GOOGLE SHEET")
+    log("LOAD GOOGLE SHEET")
 
     res = requests.get(
         CSV_URL,
@@ -111,7 +116,7 @@ def load_mapping():
         if key:
             mapping_cache[key] = value
 
-    print(
+    log(
         f"MAPPING COUNT: {len(mapping_cache)}"
     )
 
@@ -136,15 +141,15 @@ def get_target_sheet(wb):
 
     first_sheet = sheetnames[0]
 
-    print("FIRST SHEET:", first_sheet)
+    log("FIRST SHEET:", first_sheet)
 
     if normalize(first_sheet) == "検索情報":
 
-        print("検索情報 sheet detected")
+        log("検索情報 sheet detected")
 
         if len(sheetnames) >= 2:
 
-            print(
+            log(
                 "USE SECOND SHEET:",
                 sheetnames[1]
             )
@@ -153,7 +158,7 @@ def get_target_sheet(wb):
 
         return None
 
-    print("USE FIRST SHEET")
+    log("USE FIRST SHEET")
 
     return wb[first_sheet]
 
@@ -170,23 +175,38 @@ async def process_excel(
     visit: str = Form(...)
 ):
 
+    log("")
+    log("=" * 80)
+    log("PROCESS START")
+    log("=" * 80)
+
+    log("FILES COUNT:", len(files))
+    log("CIRCLE ID:", circle_id)
+    log("VISIT:", visit)
+
     target_value = get_target_value(circle_id)
 
-    print("=" * 80)
-    print("CIRCLE ID:", circle_id)
-    print("TARGET VALUE:", target_value)
-    print("=" * 80)
+    log("TARGET VALUE:", target_value)
 
     if not target_value:
-        return {
-            "error": (
+
+        log("TARGET VALUE NOT FOUND")
+
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error":
                 f"{circle_id} に対応する値が見つかりません"
-            )
-        }
+            }
+        )
 
     temp_dir = tempfile.mkdtemp()
 
+    log("TEMP DIR:", temp_dir)
+
     zip_buffer = BytesIO()
+
+    processed_file_count = 0
 
     with zipfile.ZipFile(
         zip_buffer,
@@ -199,10 +219,10 @@ async def process_excel(
 
             try:
 
-                print("\n")
-                print("=" * 80)
-                print("FILE:", file.filename)
-                print("=" * 80)
+                log("")
+                log("=" * 80)
+                log("FILE:", file.filename)
+                log("=" * 80)
 
                 input_path = os.path.join(
                     temp_dir,
@@ -210,7 +230,15 @@ async def process_excel(
                 )
 
                 with open(input_path, "wb") as f:
-                    f.write(await file.read())
+
+                    content = await file.read()
+
+                    log(
+                        "FILE SIZE:",
+                        len(content)
+                    )
+
+                    f.write(content)
 
                 base_name, ext = os.path.splitext(
                     file.filename
@@ -218,10 +246,12 @@ async def process_excel(
 
                 ext = ext.lower()
 
+                log("EXT:", ext)
+
                 # xlsx / xlsm のみ許可
                 if ext not in [".xlsx", ".xlsm"]:
 
-                    print(
+                    log(
                         "UNSUPPORTED FILE:",
                         file.filename
                     )
@@ -241,7 +271,7 @@ async def process_excel(
                     output_filename
                 )
 
-                print("OPEN WORKBOOK")
+                log("OPEN WORKBOOK")
 
                 wb = openpyxl.load_workbook(
                     input_path,
@@ -249,7 +279,7 @@ async def process_excel(
                     data_only=False
                 )
 
-                print(
+                log(
                     "SHEETS:",
                     wb.sheetnames
                 )
@@ -258,7 +288,7 @@ async def process_excel(
 
                 if ws is None:
 
-                    print(
+                    log(
                         "TARGET SHEET NOT FOUND"
                     )
 
@@ -269,9 +299,11 @@ async def process_excel(
                         arcname=output_filename
                     )
 
+                    processed_file_count += 1
+
                     continue
 
-                print(
+                log(
                     "TARGET SHEET:",
                     ws.title
                 )
@@ -289,7 +321,7 @@ async def process_excel(
                         for cell in row
                     ]
 
-                    print(
+                    log(
                         "HEADER ROW:",
                         row[0].row,
                         headers
@@ -305,7 +337,7 @@ async def process_excel(
 
                             header_row_index = row[0].row
 
-                            print(
+                            log(
                                 "FOUND COLUMN:",
                                 col_name
                             )
@@ -315,14 +347,14 @@ async def process_excel(
                     if target_col_index:
                         break
 
-                print(
+                log(
                     "TARGET COLUMN INDEX:",
                     target_col_index
                 )
 
                 if not target_col_index:
 
-                    print(
+                    log(
                         "COLUMN NOT FOUND"
                     )
 
@@ -332,6 +364,8 @@ async def process_excel(
                         output_path,
                         arcname=output_filename
                     )
+
+                    processed_file_count += 1
 
                     continue
 
@@ -357,7 +391,7 @@ async def process_excel(
                         header_row_index + 20
                     ):
 
-                        print(
+                        log(
                             "ROW:",
                             row_idx,
                             "RAW:",
@@ -376,12 +410,12 @@ async def process_excel(
 
                         delete_rows.append(row_idx)
 
-                print(
+                log(
                     "MATCHED COUNT:",
                     matched_count
                 )
 
-                print(
+                log(
                     "DELETE COUNT:",
                     len(delete_rows)
                 )
@@ -393,7 +427,7 @@ async def process_excel(
                         1
                     )
 
-                print(
+                log(
                     "SAVE:",
                     output_filename
                 )
@@ -405,16 +439,35 @@ async def process_excel(
                     arcname=output_filename
                 )
 
-                print(
+                processed_file_count += 1
+
+                log(
                     "ZIP ADD:",
                     output_filename
                 )
 
             except Exception as e:
 
-                print(
-                    f"ERROR: {file.filename}: {str(e)}"
-                )
+                log("")
+                log("ERROR OCCURRED")
+                log(str(e))
+
+                traceback.print_exc()
+
+    log("")
+    log("=" * 80)
+    log("PROCESSED FILE COUNT:", processed_file_count)
+    log("=" * 80)
+
+    if processed_file_count == 0:
+
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error":
+                "処理可能なxlsx/xlsmファイルがありませんでした"
+            }
+        )
 
     zip_buffer.seek(0)
 
@@ -422,7 +475,7 @@ async def process_excel(
         f"調査票2_{circle_id}_Visit-{visit}.zip"
     )
 
-    print(
+    log(
         "RETURN ZIP:",
         zip_filename
     )
