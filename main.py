@@ -44,7 +44,6 @@ def normalize(text):
     if text is None:
         return ""
 
-    return (
     text = (
         str(text)
         .replace("\ufeff", "")
@@ -57,7 +56,6 @@ def normalize(text):
     # 12345.0 → 12345
     try:
 
-def get_target_value(circle_id):
         num = float(text)
 
         if num.is_integer():
@@ -88,15 +86,12 @@ def load_mapping():
         timeout=15
     )
 
-    res = requests.get(CSV_URL, timeout=15)
     res.encoding = "utf-8"
 
-    reader = csv.reader(res.text.splitlines())
     reader = csv.reader(
         res.text.splitlines()
     )
 
-    normalized_id = normalize(circle_id)
     mapping_cache = {}
 
     for row in reader:
@@ -104,8 +99,6 @@ def load_mapping():
         if len(row) < 2:
             continue
 
-        if normalize(row[0]) == normalized_id:
-            return normalize(row[1])
         key = normalize(row[0])
         value = normalize(row[1])
 
@@ -118,7 +111,6 @@ def load_mapping():
 
     return mapping_cache
 
-    return None
 
 def get_target_value(circle_id):
 
@@ -234,20 +226,29 @@ async def process_excel(
                     file.filename
                 )
 
+                safe_target_value = (
+                    str(target_value)
+                    .replace("/", "_")
+                    .replace("\\", "_")
+                    .replace(":", "_")
+                    .replace("*", "_")
+                    .replace("?", "_")
+                    .replace('"', "_")
+                    .replace("<", "_")
+                    .replace(">", "_")
+                    .replace("|", "_")
+                )
+
                 output_path = os.path.join(
                     temp_dir,
                     f"processed_{file.filename}"
+                    f"{safe_target_value}_{file.filename}"
                 )
 
                 # 保存
                 with open(input_path, "wb") as f:
                     f.write(await file.read())
 
-                # フォーマット保持重視
-                wb = openpyxl.load_workbook(
-                    input_path,
-                    keep_vba=True,
-                    data_only=False
                 ext = os.path.splitext(
                     file.filename
                 )[1].lower()
@@ -305,6 +306,7 @@ async def process_excel(
                     zipf.write(
                         output_path,
                         arcname=file.filename
+                        arcname=os.path.basename(output_path)
                     )
 
                     continue
@@ -318,7 +320,6 @@ async def process_excel(
                 header_row_index = None
 
                 # ヘッダー探索
-                # 最大10行まで
                 for row in ws.iter_rows(
                     min_row=1,
                     max_row=min(10, ws.max_row)
@@ -344,7 +345,6 @@ async def process_excel(
                     if target_col_index:
                         break
 
-                # ID列が見つからない
                 print(
                     "TARGET COLUMN:",
                     target_col_index
@@ -362,6 +362,7 @@ async def process_excel(
                     zipf.write(
                         output_path,
                         arcname=file.filename
+                        arcname=os.path.basename(output_path)
                     )
 
                     continue
@@ -371,7 +372,6 @@ async def process_excel(
                 matched_count = 0
 
                 # 行判定
-                # openpyxl.cellアクセスを最小化
                 for row_idx in range(
                     header_row_index + 1,
                     ws.max_row + 1
@@ -383,14 +383,9 @@ async def process_excel(
                     ).value
 
                     cell_value = normalize(
-                        ws.cell(
-                            row=row_idx,
-                            column=target_col_index
-                        ).value
                         raw_value
                     )
 
-                    if cell_value != target_value:
                     # 最初の10行だけログ
                     if row_idx <= (
                         header_row_index + 10
@@ -420,7 +415,6 @@ async def process_excel(
                 )
 
                 # 後ろから削除
-                # フォーマット維持に最も安全
                 for row_idx in reversed(delete_rows):
                     ws.delete_rows(row_idx, 1)
 
@@ -429,6 +423,7 @@ async def process_excel(
                 zipf.write(
                     output_path,
                     arcname=file.filename
+                    arcname=os.path.basename(output_path)
                 )
 
                 print(
