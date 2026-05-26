@@ -21,7 +21,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-columns_to_remove = [
+columns_to_search = [
     "患者ID（文字列型）",
     "患者ID"
 ]
@@ -34,7 +34,15 @@ CSV_URL = (
 
 
 def normalize(text):
-    return str(text).replace("\ufeff", "").strip()
+    if text is None:
+        return ""
+
+    return (
+        str(text)
+        .replace("\ufeff", "")
+        .replace("\u3000", " ")
+        .strip()
+    )
 
 
 def get_target_value(circle_id):
@@ -57,6 +65,30 @@ def get_target_value(circle_id):
     return None
 
 
+def get_target_sheet(wb):
+    """
+    仕様:
+    ・1枚目が「検索情報」なら2枚目
+    ・それ以外なら1枚目
+    """
+
+    sheetnames = wb.sheetnames
+
+    if len(sheetnames) == 0:
+        return None
+
+    first_sheet = sheetnames[0]
+
+    if normalize(first_sheet) == "検索情報":
+
+        if len(sheetnames) >= 2:
+            return wb[sheetnames[1]]
+
+        return None
+
+    return wb[first_sheet]
+
+
 @app.get("/")
 def root():
     return {"message": "API OK"}
@@ -74,8 +106,7 @@ async def process_excel(
     if not target_value:
         return {
             "error": (
-                f"{circle_id} に対応する"
-                "値が見つかりません"
+                f"{circle_id} に対応する値が見つかりません"
             )
         }
 
@@ -92,36 +123,52 @@ async def process_excel(
 
         for file in files:
 
-            input_path = os.path.join(
-                temp_dir,
-                file.filename
-            )
+            try:
 
-            output_path = os.path.join(
-                temp_dir,
-                f"processed_{file.filename}"
-            )
+                input_path = os.path.join(
+                    temp_dir,
+                    file.filename
+                )
 
-            # upload保存
-            with open(input_path, "wb") as f:
-                f.write(await file.read())
+                output_path = os.path.join(
+                    temp_dir,
+                    f"processed_{file.filename}"
+                )
 
-            # keep_vba=True が重要
-            wb = openpyxl.load_workbook(
-                input_path,
-                keep_vba=True,
-                data_only=False
-            )
+                # 保存
+                with open(input_path, "wb") as f:
+                    f.write(await file.read())
 
-            for ws in wb.worksheets:
+                # フォーマット保持重視
+                wb = openpyxl.load_workbook(
+                    input_path,
+                    keep_vba=True,
+                    data_only=False
+                )
+
+                # 対象シート取得
+                ws = get_target_sheet(wb)
+
+                # 対象シートなし
+                if ws is None:
+
+                    wb.save(output_path)
+
+                    zipf.write(
+                        output_path,
+                        arcname=file.filename
+                    )
+
+                    continue
 
                 target_col_index = None
                 header_row_index = None
 
-                # header探索
+                # ヘッダー探索
+                # 最大10行まで
                 for row in ws.iter_rows(
                     min_row=1,
-                    max_row=10
+                    max_row=min(10, ws.max_row)
                 ):
 
                     headers = [
@@ -129,7 +176,7 @@ async def process_excel(
                         for cell in row
                     ]
 
-                    for col_name in columns_to_remove:
+                    for col_name in columns_to_search:
 
                         if col_name in headers:
 
@@ -144,13 +191,22 @@ async def process_excel(
                     if target_col_index:
                         break
 
-                # ID列なし
+                # ID列が見つからない
                 if not target_col_index:
+
+                    wb.save(output_path)
+
+                    zipf.write(
+                        output_path,
+                        arcname=file.filename
+                    )
+
                     continue
 
                 delete_rows = []
 
-                # データ走査
+                # 行判定
+                # openpyxl.cellアクセスを最小化
                 for row_idx in range(
                     header_row_index + 1,
                     ws.max_row + 1
@@ -167,16 +223,22 @@ async def process_excel(
                         delete_rows.append(row_idx)
 
                 # 後ろから削除
-                # これが超重要
+                # フォーマット維持に最も安全
                 for row_idx in reversed(delete_rows):
                     ws.delete_rows(row_idx, 1)
 
-            wb.save(output_path)
+                wb.save(output_path)
 
-            zipf.write(
-                output_path,
-                arcname=file.filename
-            )
+                zipf.write(
+                    output_path,
+                    arcname=file.filename
+                )
+
+            except Exception as e:
+
+                print(
+                    f"ERROR: {file.filename}: {str(e)}"
+                )
 
     zip_buffer.seek(0)
 
