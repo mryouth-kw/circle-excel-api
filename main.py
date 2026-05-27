@@ -377,19 +377,12 @@ async def process_excel(
                             output_filename
                         )
 
-                    print(
-                        "SHEETS:",
-                        wb.sheetnames
-                    )
-
                     # =========================
                     # target sheet
                     # =========================
                     ws = get_target_sheet(wb)
 
                     if ws is None:
-
-                        print("TARGET SHEET NOT FOUND")
 
                         wb.save(output_path)
 
@@ -402,32 +395,25 @@ async def process_excel(
 
                         continue
 
-                    print(
-                        "TARGET SHEET:",
-                        ws.title
-                    )
-
                     target_col_index = None
                     header_row_index = None
 
                     # =========================
                     # header search
                     # =========================
-                    for row in ws.iter_rows(
-                        min_row=1,
-                        max_row=min(10, ws.max_row),
-                        values_only=True
+                    for row_idx, row in enumerate(
+                        ws.iter_rows(
+                            min_row=1,
+                            max_row=min(10, ws.max_row),
+                            values_only=True
+                        ),
+                        start=1
                     ):
 
                         headers = [
                             normalize(v)
                             for v in row
                         ]
-
-                        print(
-                            "HEADER ROW:",
-                            headers
-                        )
 
                         for col_name in columns_to_search:
 
@@ -437,14 +423,7 @@ async def process_excel(
                                     headers.index(col_name) + 1
                                 )
 
-                                header_row_index = (
-                                    headers.index(headers[0]) + 1
-                                )
-
-                                print(
-                                    "FOUND COLUMN:",
-                                    col_name
-                                )
+                                header_row_index = row_idx
 
                                 break
 
@@ -453,11 +432,6 @@ async def process_excel(
 
                     if header_row_index is None:
                         header_row_index = 1
-
-                    print(
-                        "TARGET COLUMN INDEX:",
-                        target_col_index
-                    )
 
                     # =========================
                     # column not found
@@ -479,32 +453,20 @@ async def process_excel(
 
                     matched_count = 0
 
-                    rows_to_keep = []
-
-                    # =========================
-                    # keep header
-                    # =========================
-                    for row in ws.iter_rows(
-                        min_row=1,
-                        max_row=header_row_index,
-                        values_only=True
-                    ):
-
-                        rows_to_keep.append(
-                            list(row)
-                        )
+                    delete_rows = []
 
                     # =========================
                     # scan rows
                     # =========================
-                    for row in ws.iter_rows(
-                        min_row=header_row_index + 1,
-                        values_only=True
+                    for row_idx in range(
+                        header_row_index + 1,
+                        ws.max_row + 1
                     ):
 
-                        raw_value = row[
-                            target_col_index - 1
-                        ]
+                        raw_value = ws.cell(
+                            row=row_idx,
+                            column=target_col_index
+                        ).value
 
                         cell_value = normalize(
                             raw_value
@@ -514,46 +476,23 @@ async def process_excel(
 
                             matched_count += 1
 
-                            rows_to_keep.append(
-                                list(row)
-                            )
+                        else:
 
-                    print(
-                        "MATCHED COUNT:",
-                        matched_count
-                    )
-
-                    print(
-                        "ROWS TO KEEP:",
-                        len(rows_to_keep)
-                    )
+                            delete_rows.append(row_idx)
 
                     # =========================
-                    # recreate workbook
+                    # delete reverse order
                     # =========================
-                    new_wb = openpyxl.Workbook()
+                    for row_idx in reversed(delete_rows):
 
-                    new_ws = new_wb.active
-                    new_ws.title = ws.title
+                        ws.delete_rows(row_idx, 1)
 
-                    for row_values in rows_to_keep:
-
-                        new_ws.append(row_values)
-
-                    print(
-                        "SAVE:",
-                        output_filename
-                    )
-
-                    new_wb.save(output_path)
-
-                    new_wb.close()
+                    wb.save(output_path)
 
                     wb.close()
 
                     del wb
-                    del new_wb
-                    del rows_to_keep
+                    del delete_rows
 
                     gc.collect()
 
@@ -575,17 +514,7 @@ async def process_excel(
                     except:
                         pass
 
-                    print(
-                        "ZIP ADD:",
-                        output_filename
-                    )
-
                 except Exception as e:
-
-                    print("=" * 80)
-                    print("ERROR OCCURRED")
-                    print(traceback.format_exc())
-                    print("=" * 80)
 
                     if wb:
                         try:
