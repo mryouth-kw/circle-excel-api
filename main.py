@@ -3,18 +3,15 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 import openpyxl
-import pandas as pd
 import zipfile
 import tempfile
 import os
 import csv
 import requests
-import traceback
 import shutil
 import gc
 
 from urllib.parse import quote
-from io import BytesIO
 
 app = FastAPI()
 
@@ -191,49 +188,6 @@ def get_target_sheet(wb):
     return wb[first_sheet]
 
 
-# =========================
-# xls -> xlsx
-# =========================
-def convert_xls_to_xlsx(
-    xls_path,
-    xlsx_path
-):
-
-    excel_file = pd.ExcelFile(
-        xls_path,
-        engine="xlrd"
-    )
-
-    with pd.ExcelWriter(
-        xlsx_path,
-        engine="openpyxl"
-    ) as writer:
-
-        for sheet_name in excel_file.sheet_names:
-
-            print(
-                "CONVERT SHEET:",
-                sheet_name
-            )
-
-            df = pd.read_excel(
-                xls_path,
-                sheet_name=sheet_name,
-                engine="xlrd",
-                header=None
-            )
-
-            df.to_excel(
-                writer,
-                sheet_name=sheet_name,
-                header=False,
-                index=False
-            )
-
-    del excel_file
-    gc.collect()
-
-
 @app.get("/")
 @app.head("/")
 def root():
@@ -276,7 +230,7 @@ async def process_excel(
             zip_path,
             mode="w",
             compression=zipfile.ZIP_DEFLATED,
-            compresslevel=1
+            compresslevel=0
         ) as zipf:
 
             for file in files:
@@ -320,62 +274,35 @@ async def process_excel(
 
                     ext = ext.lower()
 
+                    # =========================
+                    # xlsx only
+                    # =========================
+                    if ext != ".xlsx":
+
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"{file.filename}: .xlsx のみ対応しています"
+                        )
+
                     safe_target_value = safe_filename(
                         target_value
                     )
 
-                    # =========================
-                    # xls
-                    # =========================
-                    if ext == ".xls":
+                    print("XLSX MODE")
 
-                        print("XLS MODE")
+                    wb = openpyxl.load_workbook(
+                        input_path,
+                        data_only=False
+                    )
 
-                        converted_path = os.path.join(
-                            temp_dir,
-                            f"converted_{base_name}.xlsx"
-                        )
+                    output_filename = (
+                        f"{safe_target_value}_{safe_input_name}"
+                    )
 
-                        convert_xls_to_xlsx(
-                            input_path,
-                            converted_path
-                        )
-
-                        wb = openpyxl.load_workbook(
-                            converted_path,
-                            data_only=False
-                        )
-
-                        output_filename = (
-                            f"{safe_target_value}_{base_name}.xlsx"
-                        )
-
-                        output_path = os.path.join(
-                            temp_dir,
-                            output_filename
-                        )
-
-                    # =========================
-                    # xlsx / xlsm
-                    # =========================
-                    else:
-
-                        print("XLSX/XLSM MODE")
-
-                        wb = openpyxl.load_workbook(
-                            input_path,
-                            keep_vba=(ext == ".xlsm"),
-                            data_only=False
-                        )
-
-                        output_filename = (
-                            f"{safe_target_value}_{safe_input_name}"
-                        )
-
-                        output_path = os.path.join(
-                            temp_dir,
-                            output_filename
-                        )
+                    output_path = os.path.join(
+                        temp_dir,
+                        output_filename
+                    )
 
                     # =========================
                     # target sheet
@@ -480,12 +407,50 @@ async def process_excel(
 
                             delete_rows.append(row_idx)
 
+                    print(
+                        "MATCHED COUNT:",
+                        matched_count
+                    )
+
                     # =========================
                     # delete reverse order
                     # =========================
-                    for row_idx in reversed(delete_rows):
+                    if delete_rows:
 
-                        ws.delete_rows(row_idx, 1)
+                        ranges = []
+
+                        start = delete_rows[0]
+                        prev = delete_rows[0]
+
+                        for row_idx in delete_rows[1:]:
+
+                            if row_idx == prev + 1:
+
+                                prev = row_idx
+
+                            else:
+
+                                ranges.append(
+                                    (start, prev)
+                                )
+
+                                start = row_idx
+                                prev = row_idx
+
+                        ranges.append((start, prev))
+
+                        # 後ろから削除
+                        for start, end in reversed(ranges):
+
+                            ws.delete_rows(
+                                start,
+                                end - start + 1
+                            )
+
+                    print(
+                        "SAVE:",
+                        output_filename
+                    )
 
                     wb.save(output_path)
 
@@ -513,6 +478,11 @@ async def process_excel(
                         os.remove(output_path)
                     except:
                         pass
+
+                    print(
+                        "ZIP ADD:",
+                        output_filename
+                    )
 
                 except Exception as e:
 
