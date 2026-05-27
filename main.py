@@ -238,7 +238,7 @@ def root():
 
 
 @app.post("/process")
-async def process_excel(
+def process_excel(
     files: list[UploadFile] = File(...),
     circle_id: str = Form(...),
     visit: str = Form(...)
@@ -286,7 +286,7 @@ async def process_excel(
 
                 # upload保存
                 with open(input_path, "wb") as f:
-                    f.write(await file.read())
+                    f.write(file.file.read())
 
                 base_name, ext = os.path.splitext(
                     file.filename
