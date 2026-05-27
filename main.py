@@ -292,8 +292,18 @@ async def process_excel(
 
                     wb = openpyxl.load_workbook(
                         input_path,
-                        data_only=False
+                        data_only=False,
+                        keep_links=False
                     )
+
+                    # =========================
+                    # recalc OFF
+                    # =========================
+                    try:
+                        wb.calculation.fullCalcOnLoad = False
+                        wb.calculation.forceFullCalc = False
+                    except:
+                        pass
 
                     output_filename = (
                         f"{safe_target_value}_{safe_input_name}"
@@ -451,6 +461,25 @@ async def process_excel(
                         "SAVE:",
                         output_filename
                     )
+
+                    # =========================
+                    # dimension/recalc suppression
+                    # =========================
+                    try:
+                        ws.sheet_properties.outlinePr.summaryBelow = True
+                    except:
+                        pass
+
+                    try:
+                        ws._current_row = ws.max_row
+                    except:
+                        pass
+
+                    try:
+                        wb.calculation.fullCalcOnLoad = False
+                        wb.calculation.forceFullCalc = False
+                    except:
+                        pass
 
                     wb.save(output_path)
 
