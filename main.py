@@ -9,6 +9,7 @@ import tempfile
 import os
 import csv
 import requests
+import traceback
 
 from io import BytesIO
 
@@ -39,6 +40,9 @@ CSV_URL = (
 mapping_cache = None
 
 
+# =========================
+# normalize
+# =========================
 def normalize(text):
 
     if text is None:
@@ -53,7 +57,6 @@ def normalize(text):
         .strip()
     )
 
-    # 12345.0 → 12345
     try:
 
         num = float(text)
@@ -68,7 +71,7 @@ def normalize(text):
 
 
 # =========================
-# ファイル名安全化
+# safe filename
 # =========================
 def safe_filename(text):
 
@@ -87,13 +90,12 @@ def safe_filename(text):
 
 
 # =========================
-# Google Sheets 読込
+# load mapping
 # =========================
 def load_mapping():
 
     global mapping_cache
 
-    # キャッシュ利用
     if mapping_cache is not None:
         return mapping_cache
 
@@ -153,14 +155,9 @@ def get_target_value(circle_id):
 
 
 # =========================
-# 対象シート取得
+# target sheet
 # =========================
 def get_target_sheet(wb):
-    """
-    仕様:
-    ・1枚目が「検索情報」なら2枚目
-    ・それ以外なら1枚目
-    """
 
     sheetnames = wb.sheetnames
 
@@ -192,7 +189,7 @@ def get_target_sheet(wb):
 
 
 # =========================
-# xls → xlsx変換
+# xls -> xlsx
 # =========================
 def convert_xls_to_xlsx(
     xls_path,
@@ -284,7 +281,6 @@ def process_excel(
                     file.filename
                 )
 
-                # upload保存
                 with open(input_path, "wb") as f:
                     f.write(file.file.read())
 
@@ -357,7 +353,7 @@ def process_excel(
                 )
 
                 # =========================
-                # 対象シート取得
+                # target sheet
                 # =========================
                 ws = get_target_sheet(wb)
 
@@ -383,7 +379,7 @@ def process_excel(
                 header_row_index = None
 
                 # =========================
-                # ヘッダー探索
+                # header search
                 # =========================
                 for row in ws.iter_rows(
                     min_row=1,
@@ -427,7 +423,7 @@ def process_excel(
                 )
 
                 # =========================
-                # ID列なし
+                # column not found
                 # =========================
                 if not target_col_index:
 
@@ -442,12 +438,24 @@ def process_excel(
 
                     continue
 
-                delete_rows = []
-
                 matched_count = 0
 
+                rows_to_keep = []
+
                 # =========================
-                # 行走査
+                # keep header rows
+                # =========================
+                for row in ws.iter_rows(
+                    min_row=1,
+                    max_row=header_row_index
+                ):
+
+                    rows_to_keep.append(
+                        [cell.value for cell in row]
+                    )
+
+                # =========================
+                # scan rows
                 # =========================
                 for row_idx in range(
                     header_row_index + 1,
@@ -482,9 +490,20 @@ def process_excel(
 
                         matched_count += 1
 
-                    else:
+                        row_values = [
+                            ws.cell(
+                                row=row_idx,
+                                column=col
+                            ).value
+                            for col in range(
+                                1,
+                                ws.max_column + 1
+                            )
+                        ]
 
-                        delete_rows.append(row_idx)
+                        rows_to_keep.append(
+                            row_values
+                        )
 
                 print(
                     "MATCHED COUNT:",
@@ -492,19 +511,24 @@ def process_excel(
                 )
 
                 print(
-                    "DELETE COUNT:",
-                    len(delete_rows)
+                    "ROWS TO KEEP:",
+                    len(rows_to_keep)
                 )
 
                 # =========================
-                # 後ろから削除
+                # clear sheet
                 # =========================
-                for row_idx in reversed(delete_rows):
+                ws.delete_rows(
+                    1,
+                    ws.max_row
+                )
 
-                    ws.delete_rows(
-                        row_idx,
-                        1
-                    )
+                # =========================
+                # rewrite rows
+                # =========================
+                for row_values in rows_to_keep:
+
+                    ws.append(row_values)
 
                 print(
                     "SAVE:",
@@ -525,16 +549,10 @@ def process_excel(
 
             except Exception as e:
 
-                import traceback
-
                 print("=" * 80)
                 print("ERROR OCCURRED")
                 print(traceback.format_exc())
                 print("=" * 80)
-
-                return {
-                    "error": str(e)
-                }
 
                 raise HTTPException(
                     status_code=500,
