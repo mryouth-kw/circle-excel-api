@@ -11,6 +11,7 @@ import csv
 import requests
 import traceback
 import shutil
+import gc
 
 from io import BytesIO
 
@@ -36,7 +37,7 @@ CSV_URL = (
 )
 
 # =========================
-# キャッシュ
+# cache
 # =========================
 mapping_cache = None
 
@@ -228,6 +229,9 @@ def convert_xls_to_xlsx(
                 index=False
             )
 
+    del excel_file
+    gc.collect()
+
 
 @app.get("/")
 @app.head("/")
@@ -260,12 +264,15 @@ async def process_excel(
 
     temp_dir = tempfile.mkdtemp()
 
+    zip_path = os.path.join(
+        temp_dir,
+        f"調査票2_{circle_id}_Visit-{visit}.zip"
+    )
+
     try:
 
-        zip_buffer = BytesIO()
-
         with zipfile.ZipFile(
-            zip_buffer,
+            zip_path,
             mode="w",
             compression=zipfile.ZIP_DEFLATED,
             compresslevel=1
@@ -273,24 +280,36 @@ async def process_excel(
 
             for file in files:
 
+                wb = None
+
                 try:
 
                     print("=" * 80)
                     print("FILE:", file.filename)
                     print("=" * 80)
 
+                    safe_input_name = safe_filename(
+                        file.filename
+                    )
+
                     input_path = os.path.join(
                         temp_dir,
-                        safe_filename(file.filename)
+                        safe_input_name
                     )
 
                     # =========================
                     # upload save
                     # =========================
-                    contents = await file.read()
-
                     with open(input_path, "wb") as f:
-                        f.write(contents)
+
+                        while True:
+
+                            chunk = await file.read(1024 * 1024)
+
+                            if not chunk:
+                                break
+
+                            f.write(chunk)
 
                     await file.close()
 
@@ -349,7 +368,7 @@ async def process_excel(
                         )
 
                         output_filename = (
-                            f"{safe_target_value}_{safe_filename(file.filename)}"
+                            f"{safe_target_value}_{safe_input_name}"
                         )
 
                         output_path = os.path.join(
@@ -373,12 +392,12 @@ async def process_excel(
 
                         wb.save(output_path)
 
+                        wb.close()
+
                         zipf.write(
                             output_path,
                             arcname=output_filename
                         )
-
-                        wb.close()
 
                         continue
 
@@ -395,17 +414,17 @@ async def process_excel(
                     # =========================
                     for row in ws.iter_rows(
                         min_row=1,
-                        max_row=min(10, ws.max_row)
+                        max_row=min(10, ws.max_row),
+                        values_only=True
                     ):
 
                         headers = [
-                            normalize(cell.value)
-                            for cell in row
+                            normalize(v)
+                            for v in row
                         ]
 
                         print(
                             "HEADER ROW:",
-                            row[0].row,
                             headers
                         )
 
@@ -417,7 +436,9 @@ async def process_excel(
                                     headers.index(col_name) + 1
                                 )
 
-                                header_row_index = row[0].row
+                                header_row_index = (
+                                    headers.index(headers[0]) + 1
+                                )
 
                                 print(
                                     "FOUND COLUMN:",
@@ -428,6 +449,9 @@ async def process_excel(
 
                         if target_col_index:
                             break
+
+                    if header_row_index is None:
+                        header_row_index = 1
 
                     print(
                         "TARGET COLUMN INDEX:",
@@ -443,12 +467,12 @@ async def process_excel(
 
                         wb.save(output_path)
 
+                        wb.close()
+
                         zipf.write(
                             output_path,
                             arcname=output_filename
                         )
-
-                        wb.close()
 
                         continue
 
@@ -457,7 +481,7 @@ async def process_excel(
                     rows_to_keep = []
 
                     # =========================
-                    # keep header rows
+                    # keep header
                     # =========================
                     for row in ws.iter_rows(
                         min_row=1,
@@ -472,52 +496,25 @@ async def process_excel(
                     # =========================
                     # scan rows
                     # =========================
-                    for row_idx in range(
-                        header_row_index + 1,
-                        ws.max_row + 1
+                    for row in ws.iter_rows(
+                        min_row=header_row_index + 1,
+                        values_only=True
                     ):
 
-                        raw_value = ws.cell(
-                            row=row_idx,
-                            column=target_col_index
-                        ).value
+                        raw_value = row[
+                            target_col_index - 1
+                        ]
 
                         cell_value = normalize(
                             raw_value
                         )
 
-                        if row_idx <= (
-                            header_row_index + 20
-                        ):
-
-                            print(
-                                "ROW:",
-                                row_idx,
-                                "RAW:",
-                                raw_value,
-                                "NORMALIZED:",
-                                cell_value,
-                                "TARGET:",
-                                target_value
-                            )
-
                         if cell_value == target_value:
 
                             matched_count += 1
 
-                            row_values = [
-                                ws.cell(
-                                    row=row_idx,
-                                    column=col
-                                ).value
-                                for col in range(
-                                    1,
-                                    ws.max_column + 1
-                                )
-                            ]
-
                             rows_to_keep.append(
-                                row_values
+                                list(row)
                             )
 
                     print(
@@ -531,33 +528,51 @@ async def process_excel(
                     )
 
                     # =========================
-                    # clear sheet
+                    # recreate workbook
                     # =========================
-                    ws.delete_rows(
-                        1,
-                        ws.max_row
-                    )
+                    new_wb = openpyxl.Workbook()
 
-                    # =========================
-                    # rewrite rows
-                    # =========================
+                    new_ws = new_wb.active
+                    new_ws.title = ws.title
+
                     for row_values in rows_to_keep:
 
-                        ws.append(row_values)
+                        new_ws.append(row_values)
 
                     print(
                         "SAVE:",
                         output_filename
                     )
 
-                    wb.save(output_path)
+                    new_wb.save(output_path)
+
+                    new_wb.close()
 
                     wb.close()
+
+                    del wb
+                    del new_wb
+                    del rows_to_keep
+
+                    gc.collect()
 
                     zipf.write(
                         output_path,
                         arcname=output_filename
                     )
+
+                    # =========================
+                    # cleanup per file
+                    # =========================
+                    try:
+                        os.remove(input_path)
+                    except:
+                        pass
+
+                    try:
+                        os.remove(output_path)
+                    except:
+                        pass
 
                     print(
                         "ZIP ADD:",
@@ -571,32 +586,36 @@ async def process_excel(
                     print(traceback.format_exc())
                     print("=" * 80)
 
+                    if wb:
+                        try:
+                            wb.close()
+                        except:
+                            pass
+
                     raise HTTPException(
                         status_code=500,
                         detail=f"{file.filename}: {str(e)}"
                     )
 
-        zip_buffer.seek(0)
+                finally:
 
-        zip_filename = (
-            f"調査票2_{circle_id}_Visit-{visit}.zip"
-        )
+                    gc.collect()
 
-        print(
-            "RETURN ZIP:",
-            zip_filename
-        )
-
+        # =========================
+        # zip response
+        # =========================
         return StreamingResponse(
-            zip_buffer,
+            open(zip_path, "rb"),
             media_type="application/zip",
             headers={
                 "Content-Disposition":
-                f'attachment; filename="{zip_filename}"'
+                f'attachment; filename="{os.path.basename(zip_path)}"'
             }
         )
 
     finally:
+
+        gc.collect()
 
         try:
             shutil.rmtree(temp_dir)
