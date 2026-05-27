@@ -10,6 +10,7 @@ import os
 import csv
 import requests
 import traceback
+import shutil
 
 from io import BytesIO
 
@@ -235,7 +236,7 @@ def root():
 
 
 @app.post("/process")
-def process_excel(
+async def process_excel(
     files: list[UploadFile] = File(...),
     circle_id: str = Form(...),
     visit: str = Form(...)
@@ -259,322 +260,345 @@ def process_excel(
 
     temp_dir = tempfile.mkdtemp()
 
-    zip_buffer = BytesIO()
+    try:
 
-    with zipfile.ZipFile(
-        zip_buffer,
-        mode="w",
-        compression=zipfile.ZIP_DEFLATED,
-        compresslevel=1
-    ) as zipf:
+        zip_buffer = BytesIO()
 
-        for file in files:
+        with zipfile.ZipFile(
+            zip_buffer,
+            mode="w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=1
+        ) as zipf:
 
-            try:
+            for file in files:
 
-                print("=" * 80)
-                print("FILE:", file.filename)
-                print("=" * 80)
+                try:
 
-                input_path = os.path.join(
-                    temp_dir,
-                    file.filename
-                )
+                    print("=" * 80)
+                    print("FILE:", file.filename)
+                    print("=" * 80)
 
-                with open(input_path, "wb") as f:
-                    f.write(file.file.read())
-
-                base_name, ext = os.path.splitext(
-                    file.filename
-                )
-
-                ext = ext.lower()
-
-                safe_target_value = safe_filename(
-                    target_value
-                )
-
-                # =========================
-                # xls
-                # =========================
-                if ext == ".xls":
-
-                    print("XLS MODE")
-
-                    converted_path = os.path.join(
+                    input_path = os.path.join(
                         temp_dir,
-                        f"converted_{base_name}.xlsx"
+                        safe_filename(file.filename)
                     )
 
-                    convert_xls_to_xlsx(
-                        input_path,
-                        converted_path
+                    # =========================
+                    # upload save
+                    # =========================
+                    contents = await file.read()
+
+                    with open(input_path, "wb") as f:
+                        f.write(contents)
+
+                    await file.close()
+
+                    base_name, ext = os.path.splitext(
+                        file.filename
                     )
 
-                    wb = openpyxl.load_workbook(
-                        converted_path,
-                        data_only=False
+                    ext = ext.lower()
+
+                    safe_target_value = safe_filename(
+                        target_value
                     )
 
-                    output_filename = (
-                        f"{safe_target_value}_{base_name}.xlsx"
-                    )
+                    # =========================
+                    # xls
+                    # =========================
+                    if ext == ".xls":
 
-                    output_path = os.path.join(
-                        temp_dir,
-                        output_filename
-                    )
+                        print("XLS MODE")
 
-                # =========================
-                # xlsx / xlsm
-                # =========================
-                else:
+                        converted_path = os.path.join(
+                            temp_dir,
+                            f"converted_{base_name}.xlsx"
+                        )
 
-                    print("XLSX/XLSM MODE")
+                        convert_xls_to_xlsx(
+                            input_path,
+                            converted_path
+                        )
 
-                    wb = openpyxl.load_workbook(
-                        input_path,
-                        keep_vba=(ext == ".xlsm"),
-                        data_only=False
-                    )
+                        wb = openpyxl.load_workbook(
+                            converted_path,
+                            data_only=False
+                        )
 
-                    output_filename = (
-                        f"{safe_target_value}_{file.filename}"
-                    )
+                        output_filename = (
+                            f"{safe_target_value}_{base_name}.xlsx"
+                        )
 
-                    output_path = os.path.join(
-                        temp_dir,
-                        output_filename
-                    )
+                        output_path = os.path.join(
+                            temp_dir,
+                            output_filename
+                        )
 
-                print(
-                    "SHEETS:",
-                    wb.sheetnames
-                )
+                    # =========================
+                    # xlsx / xlsm
+                    # =========================
+                    else:
 
-                # =========================
-                # target sheet
-                # =========================
-                ws = get_target_sheet(wb)
+                        print("XLSX/XLSM MODE")
 
-                if ws is None:
+                        wb = openpyxl.load_workbook(
+                            input_path,
+                            keep_vba=(ext == ".xlsm"),
+                            data_only=False
+                        )
 
-                    print("TARGET SHEET NOT FOUND")
+                        output_filename = (
+                            f"{safe_target_value}_{safe_filename(file.filename)}"
+                        )
 
-                    wb.save(output_path)
-
-                    zipf.write(
-                        output_path,
-                        arcname=output_filename
-                    )
-
-                    continue
-
-                print(
-                    "TARGET SHEET:",
-                    ws.title
-                )
-
-                target_col_index = None
-                header_row_index = None
-
-                # =========================
-                # header search
-                # =========================
-                for row in ws.iter_rows(
-                    min_row=1,
-                    max_row=min(10, ws.max_row)
-                ):
-
-                    headers = [
-                        normalize(cell.value)
-                        for cell in row
-                    ]
+                        output_path = os.path.join(
+                            temp_dir,
+                            output_filename
+                        )
 
                     print(
-                        "HEADER ROW:",
-                        row[0].row,
-                        headers
+                        "SHEETS:",
+                        wb.sheetnames
                     )
 
-                    for col_name in columns_to_search:
+                    # =========================
+                    # target sheet
+                    # =========================
+                    ws = get_target_sheet(wb)
 
-                        if col_name in headers:
+                    if ws is None:
 
-                            target_col_index = (
-                                headers.index(col_name) + 1
-                            )
+                        print("TARGET SHEET NOT FOUND")
 
-                            header_row_index = row[0].row
+                        wb.save(output_path)
 
-                            print(
-                                "FOUND COLUMN:",
-                                col_name
-                            )
+                        zipf.write(
+                            output_path,
+                            arcname=output_filename
+                        )
 
+                        wb.close()
+
+                        continue
+
+                    print(
+                        "TARGET SHEET:",
+                        ws.title
+                    )
+
+                    target_col_index = None
+                    header_row_index = None
+
+                    # =========================
+                    # header search
+                    # =========================
+                    for row in ws.iter_rows(
+                        min_row=1,
+                        max_row=min(10, ws.max_row)
+                    ):
+
+                        headers = [
+                            normalize(cell.value)
+                            for cell in row
+                        ]
+
+                        print(
+                            "HEADER ROW:",
+                            row[0].row,
+                            headers
+                        )
+
+                        for col_name in columns_to_search:
+
+                            if col_name in headers:
+
+                                target_col_index = (
+                                    headers.index(col_name) + 1
+                                )
+
+                                header_row_index = row[0].row
+
+                                print(
+                                    "FOUND COLUMN:",
+                                    col_name
+                                )
+
+                                break
+
+                        if target_col_index:
                             break
 
-                    if target_col_index:
-                        break
+                    print(
+                        "TARGET COLUMN INDEX:",
+                        target_col_index
+                    )
 
-                print(
-                    "TARGET COLUMN INDEX:",
-                    target_col_index
-                )
+                    # =========================
+                    # column not found
+                    # =========================
+                    if not target_col_index:
 
-                # =========================
-                # column not found
-                # =========================
-                if not target_col_index:
+                        print("COLUMN NOT FOUND")
 
-                    print("COLUMN NOT FOUND")
+                        wb.save(output_path)
+
+                        zipf.write(
+                            output_path,
+                            arcname=output_filename
+                        )
+
+                        wb.close()
+
+                        continue
+
+                    matched_count = 0
+
+                    rows_to_keep = []
+
+                    # =========================
+                    # keep header rows
+                    # =========================
+                    for row in ws.iter_rows(
+                        min_row=1,
+                        max_row=header_row_index,
+                        values_only=True
+                    ):
+
+                        rows_to_keep.append(
+                            list(row)
+                        )
+
+                    # =========================
+                    # scan rows
+                    # =========================
+                    for row_idx in range(
+                        header_row_index + 1,
+                        ws.max_row + 1
+                    ):
+
+                        raw_value = ws.cell(
+                            row=row_idx,
+                            column=target_col_index
+                        ).value
+
+                        cell_value = normalize(
+                            raw_value
+                        )
+
+                        if row_idx <= (
+                            header_row_index + 20
+                        ):
+
+                            print(
+                                "ROW:",
+                                row_idx,
+                                "RAW:",
+                                raw_value,
+                                "NORMALIZED:",
+                                cell_value,
+                                "TARGET:",
+                                target_value
+                            )
+
+                        if cell_value == target_value:
+
+                            matched_count += 1
+
+                            row_values = [
+                                ws.cell(
+                                    row=row_idx,
+                                    column=col
+                                ).value
+                                for col in range(
+                                    1,
+                                    ws.max_column + 1
+                                )
+                            ]
+
+                            rows_to_keep.append(
+                                row_values
+                            )
+
+                    print(
+                        "MATCHED COUNT:",
+                        matched_count
+                    )
+
+                    print(
+                        "ROWS TO KEEP:",
+                        len(rows_to_keep)
+                    )
+
+                    # =========================
+                    # clear sheet
+                    # =========================
+                    ws.delete_rows(
+                        1,
+                        ws.max_row
+                    )
+
+                    # =========================
+                    # rewrite rows
+                    # =========================
+                    for row_values in rows_to_keep:
+
+                        ws.append(row_values)
+
+                    print(
+                        "SAVE:",
+                        output_filename
+                    )
 
                     wb.save(output_path)
+
+                    wb.close()
 
                     zipf.write(
                         output_path,
                         arcname=output_filename
                     )
 
-                    continue
-
-                matched_count = 0
-
-                rows_to_keep = []
-
-                # =========================
-                # keep header rows
-                # =========================
-                for row in ws.iter_rows(
-                    min_row=1,
-                    max_row=header_row_index
-                ):
-
-                    rows_to_keep.append(
-                        [cell.value for cell in row]
+                    print(
+                        "ZIP ADD:",
+                        output_filename
                     )
 
-                # =========================
-                # scan rows
-                # =========================
-                for row_idx in range(
-                    header_row_index + 1,
-                    ws.max_row + 1
-                ):
+                except Exception as e:
 
-                    raw_value = ws.cell(
-                        row=row_idx,
-                        column=target_col_index
-                    ).value
+                    print("=" * 80)
+                    print("ERROR OCCURRED")
+                    print(traceback.format_exc())
+                    print("=" * 80)
 
-                    cell_value = normalize(
-                        raw_value
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"{file.filename}: {str(e)}"
                     )
 
-                    if row_idx <= (
-                        header_row_index + 20
-                    ):
+        zip_buffer.seek(0)
 
-                        print(
-                            "ROW:",
-                            row_idx,
-                            "RAW:",
-                            raw_value,
-                            "NORMALIZED:",
-                            cell_value,
-                            "TARGET:",
-                            target_value
-                        )
+        zip_filename = (
+            f"調査票2_{circle_id}_Visit-{visit}.zip"
+        )
 
-                    if cell_value == target_value:
+        print(
+            "RETURN ZIP:",
+            zip_filename
+        )
 
-                        matched_count += 1
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition":
+                f'attachment; filename="{zip_filename}"'
+            }
+        )
 
-                        row_values = [
-                            ws.cell(
-                                row=row_idx,
-                                column=col
-                            ).value
-                            for col in range(
-                                1,
-                                ws.max_column + 1
-                            )
-                        ]
+    finally:
 
-                        rows_to_keep.append(
-                            row_values
-                        )
-
-                print(
-                    "MATCHED COUNT:",
-                    matched_count
-                )
-
-                print(
-                    "ROWS TO KEEP:",
-                    len(rows_to_keep)
-                )
-
-                # =========================
-                # clear sheet
-                # =========================
-                ws.delete_rows(
-                    1,
-                    ws.max_row
-                )
-
-                # =========================
-                # rewrite rows
-                # =========================
-                for row_values in rows_to_keep:
-
-                    ws.append(row_values)
-
-                print(
-                    "SAVE:",
-                    output_filename
-                )
-
-                wb.save(output_path)
-
-                zipf.write(
-                    output_path,
-                    arcname=output_filename
-                )
-
-                print(
-                    "ZIP ADD:",
-                    output_filename
-                )
-
-            except Exception as e:
-
-                print("=" * 80)
-                print("ERROR OCCURRED")
-                print(traceback.format_exc())
-                print("=" * 80)
-
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"{file.filename}: {str(e)}"
-                )
-
-    zip_buffer.seek(0)
-
-    zip_filename = (
-        f"調査票2_{circle_id}_Visit-{visit}.zip"
-    )
-
-    print(
-        "RETURN ZIP:",
-        zip_filename
-    )
-
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={
-            "Content-Disposition":
-            f'attachment; filename="{zip_filename}"'
-        }
-    )
+        try:
+            shutil.rmtree(temp_dir)
+        except:
+            pass
