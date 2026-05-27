@@ -13,6 +13,7 @@ import traceback
 import shutil
 import gc
 
+from urllib.parse import quote
 from io import BytesIO
 
 app = FastAPI()
@@ -604,12 +605,16 @@ async def process_excel(
         # =========================
         # zip response
         # =========================
+        zip_filename = os.path.basename(zip_path)
+
+        encoded_filename = quote(zip_filename)
+
         return StreamingResponse(
             open(zip_path, "rb"),
             media_type="application/zip",
             headers={
                 "Content-Disposition":
-                f'attachment; filename="{os.path.basename(zip_path)}"'
+                f"attachment; filename*=UTF-8''{encoded_filename}"
             }
         )
 
